@@ -1,0 +1,201 @@
+package gitops
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"issue-agent-runner/internal/config"
+)
+
+func TestPrepareIssueWorktreeCreatesBranchAndPath(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{
+		Name:              "ml-svc-zcode",
+		Path:              repoPath,
+		IssueBranchPrefix: "cnb",
+		BaselineBranch:    "ai-v2.0",
+	}
+
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.CleanupIssueWorktree(context.Background(), repoPath, worktree.WorktreePath, worktree.IssueBranch))
+	})
+	require.Equal(t, "cnb/issue-77/ml-svc-zcode", worktree.IssueBranch)
+	require.DirExists(t, worktree.WorktreePath)
+
+	current, err := runGit(context.Background(), worktree.WorktreePath, "branch", "--show-current")
+	require.NoError(t, err)
+	require.Equal(t, worktree.IssueBranch, current)
+}
+
+func TestMergeIssueBranchReturnsMergeCommit(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.CleanupIssueWorktree(context.Background(), repoPath, worktree.WorktreePath, worktree.IssueBranch))
+	})
+
+	writeFile(t, filepath.Join(worktree.WorktreePath, "feature.txt"), "issue 77\n")
+	_, err = runGit(context.Background(), worktree.WorktreePath, "add", "feature.txt")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), worktree.WorktreePath, "commit", "-m", "fix(issue-77): add feature")
+	require.NoError(t, err)
+
+	result, err := manager.MergeIssueBranch(context.Background(), repoPath, repo.BaselineBranch, worktree.IssueBranch, "no-ff")
+	require.NoError(t, err)
+	require.NotEmpty(t, result.MergeCommit)
+
+	head, err := runGit(context.Background(), repoPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	require.Equal(t, result.MergeCommit, head)
+}
+
+func TestMergeIssueBranchReturnsConflictFilesAndAborts(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.CleanupIssueWorktree(context.Background(), repoPath, worktree.WorktreePath, worktree.IssueBranch))
+	})
+
+	writeFile(t, filepath.Join(worktree.WorktreePath, "shared.txt"), "issue branch change\n")
+	_, err = runGit(context.Background(), worktree.WorktreePath, "add", "shared.txt")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), worktree.WorktreePath, "commit", "-m", "fix(issue-77): issue side")
+	require.NoError(t, err)
+
+	_, err = runGit(context.Background(), repoPath, "checkout", repo.BaselineBranch)
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(repoPath, "shared.txt"), "baseline change\n")
+	_, err = runGit(context.Background(), repoPath, "add", "shared.txt")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "commit", "-m", "chore: baseline side")
+	require.NoError(t, err)
+
+	_, err = manager.MergeIssueBranch(context.Background(), repoPath, repo.BaselineBranch, worktree.IssueBranch, "no-ff")
+	require.Error(t, err)
+
+	var conflictErr *MergeConflictError
+	require.ErrorAs(t, err, &conflictErr)
+	require.Contains(t, conflictErr.Files, "shared.txt")
+
+	status, statusErr := runGit(context.Background(), repoPath, "status", "--short")
+	require.NoError(t, statusErr)
+	require.Empty(t, status)
+}
+
+func TestRevertMergeCommitRestoresBaseline(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.CleanupIssueWorktree(context.Background(), repoPath, worktree.WorktreePath, worktree.IssueBranch))
+	})
+
+	writeFile(t, filepath.Join(worktree.WorktreePath, "feature.txt"), "issue 77\n")
+	_, err = runGit(context.Background(), worktree.WorktreePath, "add", "feature.txt")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), worktree.WorktreePath, "commit", "-m", "fix(issue-77): add feature")
+	require.NoError(t, err)
+
+	mergeResult, err := manager.MergeIssueBranch(context.Background(), repoPath, repo.BaselineBranch, worktree.IssueBranch, "no-ff")
+	require.NoError(t, err)
+
+	revertCommit, err := manager.RevertMergeCommit(context.Background(), repoPath, repo.BaselineBranch, mergeResult.MergeCommit)
+	require.NoError(t, err)
+	require.NotEmpty(t, revertCommit)
+
+	_, err = os.Stat(filepath.Join(repoPath, "feature.txt"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestPushBaselineBranchUpdatesOrigin(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.CleanupIssueWorktree(context.Background(), repoPath, worktree.WorktreePath, worktree.IssueBranch))
+	})
+
+	writeFile(t, filepath.Join(worktree.WorktreePath, "feature.txt"), "issue 77\n")
+	_, err = runGit(context.Background(), worktree.WorktreePath, "add", "feature.txt")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), worktree.WorktreePath, "commit", "-m", "fix(issue-77): add feature")
+	require.NoError(t, err)
+
+	mergeResult, err := manager.MergeIssueBranch(context.Background(), repoPath, repo.BaselineBranch, worktree.IssueBranch, "no-ff")
+	require.NoError(t, err)
+
+	pushedSHA, err := manager.PushBaselineBranch(context.Background(), repoPath, repo.BaselineBranch)
+	require.NoError(t, err)
+	require.Equal(t, mergeResult.MergeCommit, pushedSHA)
+
+	originSHA, err := runGit(context.Background(), repoPath, "ls-remote", "origin", "refs/heads/"+repo.BaselineBranch)
+	require.NoError(t, err)
+	require.Contains(t, originSHA, pushedSHA)
+}
+
+func TestCleanupIssueWorktreeRemovesWorktreeAndBranch(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.NoError(t, err)
+
+	err = manager.CleanupIssueWorktree(context.Background(), repoPath, worktree.WorktreePath, worktree.IssueBranch)
+	require.NoError(t, err)
+	require.NoDirExists(t, worktree.WorktreePath)
+
+	branches, err := runGit(context.Background(), repoPath, "branch", "--list", worktree.IssueBranch)
+	require.NoError(t, err)
+	require.Empty(t, branches)
+}
+
+func createTestRepo(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+	originPath := filepath.Join(root, "origin.git")
+	repoPath := filepath.Join(root, "repo")
+
+	_, err := runGit(context.Background(), root, "init", "--bare", originPath)
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), root, "clone", originPath, repoPath)
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "config", "user.name", "Issue Agent Runner")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "config", "user.email", "runner@example.com")
+	require.NoError(t, err)
+
+	writeFile(t, filepath.Join(repoPath, "README.md"), "hello\n")
+	_, err = runGit(context.Background(), repoPath, "add", "README.md")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "commit", "-m", "chore: initial commit")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "branch", "-M", "ai-v2.0")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "push", "-u", "origin", "ai-v2.0")
+	require.NoError(t, err)
+
+	return repoPath
+}
+
+func writeFile(t *testing.T, path string, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}

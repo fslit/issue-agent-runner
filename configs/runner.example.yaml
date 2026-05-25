@@ -1,0 +1,107 @@
+project:
+  name: zcode
+  workspace: /Users/m4/Documents/code/zcode
+  # Legacy fallback for provider.token.from=gitRemote during the migration.
+  serviceRepo: ml-svc-zcode
+
+repositories:
+  - name: ml-svc-zcode
+    path: ml-svc-zcode
+    issueBranchPrefix: cnb
+    baselineBranch: ai-v2.0
+  - name: ml-web-zcode
+    path: ml-web-zcode
+    issueBranchPrefix: cnb
+    baselineBranch: poc/api-adapter-validation
+
+provider:
+  type: cnb
+  repo: dianyuniot/mlink/ml-svc-zcode
+  token:
+    from: gitRemote
+
+executor:
+  type: codex
+  bin: /Users/m4/.local/bin/codex
+  model: gpt-5.5
+  sandbox: danger-full-access
+  approval: never
+  reasoningEffort: xhigh
+
+runner:
+  intervalSeconds: 60
+  maxConcurrency: 5
+  maxAttempts: 3
+  retryBackoffSeconds: 300
+  capacityBackoffSeconds: 900
+  quotaBackoffSeconds: 3600
+  staleWorkerSeconds: 7200
+  # Hard upper bound for one worker process, independent of log activity.
+  hardWorkerSeconds: 14400
+
+labels:
+  running: 处理中
+  done: 已处理
+  failed: 处理失败
+  needsHuman: 需人工确认
+  skip:
+    - 已处理
+    - 处理中
+    - 处理失败
+    - 需人工确认
+
+paths:
+  # Keep the legacy Python runner state path during the zcode migration.
+  stateDir: .local_cache/cnb-issue-runner
+  promptTemplate: templates/worker_prompt.md
+
+browser:
+  enabled: false
+  mode: playwright
+  baseURL: http://localhost:5173
+  startCommand: pnpm dev
+  healthCheckURL: http://localhost:5173/zcode/web
+  timeoutSeconds: 180
+  artifactDir: .local_cache/issue-agent-runner/browser
+  enableForLabels:
+    - 前端
+    - UI
+    - 浏览器验证
+
+hooks:
+  onIssueClaim:
+    command: ""
+    timeoutSeconds: 30
+  onIssuePaused:
+    webhook:
+      url: ""
+      method: POST
+  onProgressUpdate:
+    command: ""
+    timeoutSeconds: 30
+  # Fired after an issue is merged into local baseline branches and waits for manual verification.
+  onIssueIntegrated:
+    command: ""
+    timeoutSeconds: 180
+  # Fired after `issue-agent-runner reject <issue>` reverts the local baseline merge.
+  onIssueRejected:
+    command: ""
+    timeoutSeconds: 180
+  # Fired after a closed issue pushes touched baseline branches and cleans temporary worktrees.
+  onIssueClosedPushed:
+    command: ""
+    timeoutSeconds: 60
+
+callback:
+  enabled: true
+  listen: 127.0.0.1:8791
+  path: /callbacks/cnb
+  secret: change-me
+  secretHeader: X-Issue-Agent-Token
+
+integration:
+  worktreeRoot: .local_worktrees/issue-agent-runner
+  mergeMode: no-ff
+  pushOnClose: true
+  cleanupOnClose: true
+  allowSinglePendingVerify: true
