@@ -1,6 +1,9 @@
 # IssueAgent Runner
 
-IssueAgent Runner is a reusable Go-based issue automation runner.
+IssueAgent Runner is an issue-driven agent runner for isolated fixes, baseline
+integration, and verification workflow.
+
+It is a reusable Go-based issue automation runner.
 
 It polls issue platforms such as CNB or GitHub, dispatches AI workers such as
 Codex with bounded concurrency, tracks retry/backoff state, pauses repeated
