@@ -67,8 +67,8 @@ class CnbIssueRunnerTest(unittest.TestCase):
         self.assertEqual(runner.DEFAULT_CAPACITY_BACKOFF_SECONDS, 1800)
         self.assertEqual(runner.DEFAULT_PUSH_RETRY_BACKOFF_SECONDS, 600)
 
-    def test_default_max_concurrency_is_two_digits(self):
-        self.assertGreaterEqual(runner.DEFAULT_MAX_CONCURRENCY, 10)
+    def test_default_max_concurrency_is_conservative_for_shared_workspace(self):
+        self.assertEqual(runner.DEFAULT_MAX_CONCURRENCY, 2)
 
     def test_format_log_line_prefixes_timestamp(self):
         line = runner.format_log_line("poll complete: open=1 candidates=0 capacity=7", now=0)
