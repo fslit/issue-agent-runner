@@ -11,12 +11,30 @@ PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 CODEX_BIN="${CODEX_BIN:-$(command -v codex)}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.5}"
 CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-xhigh}"
-MAX_CONCURRENCY="${MAX_CONCURRENCY:-7}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-10}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 RETRY_BACKOFF_SECONDS="${RETRY_BACKOFF_SECONDS:-600}"
 CAPACITY_BACKOFF_SECONDS="${CAPACITY_BACKOFF_SECONDS:-1800}"
 STALE_WORKER_SECONDS="${STALE_WORKER_SECONDS:-7200}"
+MALLOC_DEBUG_ENV_KEYS=(
+  MallocStackLogging
+  MallocStackLoggingNoCompact
+  MallocScribble
+  MallocGuardEdges
+  MallocNanoZone
+  MallocCheckHeapStart
+  MallocCheckHeapEach
+)
+
+unset_malloc_debug_env() {
+  local key
+  for key in "${MALLOC_DEBUG_ENV_KEYS[@]}"; do
+    unset "${key}" || true
+  done
+}
+
+unset_malloc_debug_env
 
 mkdir -p "${STATE_DIR}"
 chmod +x "${RUNNER}"
@@ -29,7 +47,8 @@ is_running() {
 }
 
 runner_command() {
-  printf 'cd %q && exec %q -u %q --daemon --workspace %q --interval %q --max-concurrency %q --max-attempts %q --retry-backoff-seconds %q --capacity-backoff-seconds %q --stale-worker-seconds %q --codex-bin %q --codex-model %q --codex-reasoning-effort %q >> %q 2>&1' \
+  printf 'unset %s; cd %q && exec %q -u %q --daemon --workspace %q --interval %q --max-concurrency %q --max-attempts %q --retry-backoff-seconds %q --capacity-backoff-seconds %q --stale-worker-seconds %q --codex-bin %q --codex-model %q --codex-reasoning-effort %q >> %q 2>&1' \
+    "${MALLOC_DEBUG_ENV_KEYS[*]}" \
     "${WORKSPACE}" \
     "${PYTHON_BIN}" \
     "${RUNNER}" \

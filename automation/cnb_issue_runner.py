@@ -17,12 +17,14 @@ import sys
 import time
 from typing import Any, Callable
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
 DEFAULT_INTERVAL_SECONDS = 60
-DEFAULT_MAX_CONCURRENCY = 7
+DEFAULT_MAX_CONCURRENCY = 10
 RUNNING_LABEL = "处理中"
+RUNNING_LABEL_ALIASES = {RUNNING_LABEL, "ai:in-progress"}
 FAILED_LABEL = "处理失败"
 NEEDS_HUMAN_LABEL = "需人工确认"
 DONE_LABEL = "已处理"
@@ -30,9 +32,19 @@ DEFAULT_SKIP_LABELS = {DONE_LABEL, RUNNING_LABEL, FAILED_LABEL, NEEDS_HUMAN_LABE
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 600
 DEFAULT_CAPACITY_BACKOFF_SECONDS = 1800
+DEFAULT_PUSH_RETRY_BACKOFF_SECONDS = 600
 DEFAULT_STALE_WORKER_SECONDS = 7200
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
+MALLOC_DEBUG_ENV_KEYS = {
+    "MallocStackLogging",
+    "MallocStackLoggingNoCompact",
+    "MallocScribble",
+    "MallocGuardEdges",
+    "MallocNanoZone",
+    "MallocCheckHeapStart",
+    "MallocCheckHeapEach",
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,13 @@ class PushedRepo:
     commits: list[str]
 
 
+def sanitized_subprocess_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    cleaned = dict(os.environ if env is None else env)
+    for key in MALLOC_DEBUG_ENV_KEYS:
+        cleaned.pop(key, None)
+    return cleaned
+
+
 def parse_cnb_remote(remote_url: str) -> tuple[str, str]:
     prefix = "https://cnb:"
     host_marker = "@cnb.cool/"
@@ -70,6 +89,20 @@ def issue_label_names(issue: dict[str, Any]) -> set[str]:
     return {str(label.get("name", "")) for label in issue.get("labels", []) if isinstance(label, dict)}
 
 
+def labels_for_inactive_running_issue(issue: dict[str, Any], meta: dict[str, Any]) -> list[str] | None:
+    labels = issue_label_names(issue)
+    if labels.isdisjoint(RUNNING_LABEL_ALIASES):
+        return None
+    if not meta.get("paused") and not meta.get("lastFinishedAt"):
+        return None
+
+    labels.difference_update(RUNNING_LABEL_ALIASES)
+    if meta.get("paused"):
+        error = str(meta.get("lastError", ""))
+        labels.add(NEEDS_HUMAN_LABEL if is_resource_backoff_error(error) else FAILED_LABEL)
+    return sorted(labels)
+
+
 def filter_processable_issues(issues: list[dict[str, Any]], skip_labels: set[str]) -> list[dict[str, Any]]:
     return [issue for issue in issues if issue_label_names(issue).isdisjoint(skip_labels)]
 
@@ -84,6 +117,7 @@ def process_alive(pid: int) -> bool:
             stderr=subprocess.DEVNULL,
             text=True,
             check=False,
+            env=sanitized_subprocess_env(),
         ).stdout.strip()
         if stat.startswith("Z"):
             return False
@@ -139,6 +173,9 @@ def is_resource_backoff_error(message: str) -> bool:
         or "rate limit" in lowered
         or "quota" in lowered
         or "额度不足" in message
+        or "订阅" in message
+        or "no active subscription" in lowered
+        or "no forced gpt backup channel" in lowered
         or "403 forbidden" in lowered
     )
 
@@ -309,6 +346,36 @@ def remove_terminal_issue_workers(
         workers.pop(number, None)
 
 
+def sync_inactive_running_issue_labels(
+    token: str,
+    repo_path: str,
+    issues: list[dict[str, Any]],
+    state: dict[str, Any],
+) -> None:
+    workers = state.get("workers", {})
+    issue_meta = state.get("issues", {})
+    for issue in issues:
+        number = issue_number(issue)
+        if number in workers:
+            continue
+        meta = issue_meta.get(number, {}) if isinstance(issue_meta, dict) else {}
+        if not isinstance(meta, dict):
+            continue
+        labels = labels_for_inactive_running_issue(issue, meta)
+        if labels is None or set(labels) == issue_label_names(issue):
+            continue
+        try:
+            current_labels = issue_label_names(issue)
+            set_issue_labels(token, repo_path, number, labels)
+            for removed_label in sorted(current_labels - set(labels)):
+                with contextlib.suppress(Exception):
+                    delete_issue_label(token, repo_path, number, removed_label)
+            log_line(f"synced inactive issue #{number} labels={','.join(labels) or '<none>'}")
+        except Exception as error:  # noqa: BLE001 - do not block other issues when label sync fails.
+            meta["labelSyncError"] = str(error)
+            log_line(f"label sync failed for issue #{number}: {error}", file=sys.stderr)
+
+
 def default_workspace() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -413,6 +480,9 @@ def render_progress_summary(issues: list[dict[str, Any]], state: dict[str, Any],
             continue
         if number not in issue_by_number and number not in workers:
             continue
+        issue = issue_by_number.get(number, {})
+        if issue and issue_is_terminal(issue):
+            continue
         title = meta.get("title") or issue_title(issue_by_number.get(number, {}))
         if meta.get("paused"):
             paused_lines.append(f"- #{number} attempts={meta.get('attempts', 0)} {title} error={meta.get('lastError', '')}")
@@ -458,6 +528,7 @@ def run_git_remote(workspace: Path, service_repo: str) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=sanitized_subprocess_env(),
     )
     return result.stdout.strip()
 
@@ -502,6 +573,12 @@ def set_issue_labels(token: str, repo_path: str, issue_number: str, labels: list
     cnb_request(token, "PUT", url, {"labels": labels})
 
 
+def delete_issue_label(token: str, repo_path: str, issue_number: str, label: str) -> None:
+    encoded_label = urllib.parse.quote(label, safe="")
+    url = f"https://api.cnb.cool/{repo_path}/-/issues/{issue_number}/labels/{encoded_label}"
+    cnb_request(token, "DELETE", url)
+
+
 def add_issue_comment(token: str, repo_path: str, issue_number_value: str, body: str) -> None:
     url = f"https://api.cnb.cool/{repo_path}/-/issues/{issue_number_value}/comments"
     cnb_request(token, "POST", url, {"body": body})
@@ -537,6 +614,7 @@ def run_git(repo_path: Path, args: list[str], check: bool = True) -> subprocess.
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=sanitized_subprocess_env(),
     )
 
 
@@ -558,13 +636,13 @@ def unpushed_issue_commits(repo_path: Path, issue_number_value: str) -> list[str
         repo_path,
         [
             "log",
+            "--cherry-pick",
+            "--right-only",
             "--regexp-ignore-case",
             "--format=%H",
             "--grep",
             pattern,
-            "HEAD",
-            "--not",
-            "--remotes=origin",
+            "@{upstream}...HEAD",
         ],
         check=False,
     )
@@ -592,6 +670,10 @@ def push_issue_commits(workspace: Path, issue_number_value: str) -> list[PushedR
     return pushed
 
 
+def has_unpushed_issue_commits(workspace: Path, issue_number_value: str) -> bool:
+    return any(unpushed_issue_commits(repo_path, issue_number_value) for repo_path in discover_git_repositories(workspace))
+
+
 def render_pushed_comment(issue_number_value: str, pushed: list[PushedRepo]) -> str:
     lines = [
         f"Issue #{issue_number_value} 已进入终态，runner 已自动推送相关提交。",
@@ -605,26 +687,76 @@ def render_pushed_comment(issue_number_value: str, pushed: list[PushedRepo]) -> 
     return "\n".join(lines)
 
 
+def pushed_repo_records(pushed: list[PushedRepo]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": repo.name,
+            "branch": repo.branch,
+            "headSha": repo.head_sha,
+            "commits": repo.commits,
+        }
+        for repo in pushed
+    ]
+
+
+def append_pushed_repo_records(meta: dict[str, Any], pushed: list[PushedRepo]) -> None:
+    existing = meta.get("pushedRepos")
+    if not isinstance(existing, list):
+        existing = []
+    existing.extend(pushed_repo_records(pushed))
+    meta["pushedRepos"] = existing
+
+
+def issue_last_exit_code(meta: dict[str, Any]) -> int:
+    value = meta.get("lastExitCode", -1)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
 def terminal_issue_candidates(
     issues: list[dict[str, Any]],
     state: dict[str, Any],
     token: str,
     repo_path: str,
+    now: int,
+    has_unpushed_commits: Callable[[str], bool] | None = None,
 ) -> dict[str, dict[str, Any]]:
     candidates: dict[str, dict[str, Any]] = {}
     for issue in issues:
         number = issue_number(issue)
         if number not in state.get("issues", {}) or number in state.get("workers", {}):
             continue
+        meta = state.get("issues", {}).get(number, {})
+        if isinstance(meta, dict) and int(meta.get("nextPushRetryAt", 0) or 0) > now:
+            continue
+        if isinstance(meta, dict) and meta.get("pushCompletedAt"):
+            checker = has_unpushed_commits or (lambda _number: False)
+            if not checker(number):
+                continue
         if issue_is_terminal(issue):
             candidates[number] = issue
 
     for number, meta in list(state.get("issues", {}).items()):
         if number in state.get("workers", {}):
             continue
-        if not isinstance(meta, dict) or meta.get("pushCompletedAt"):
+        if not isinstance(meta, dict):
             continue
-        if int(meta.get("lastExitCode", -1) or -1) != 0 and not meta.get("pushError"):
+        if int(meta.get("nextPushRetryAt", 0) or 0) > now:
+            continue
+        local_unpushed: bool | None = None
+
+        def issue_has_unpushed_commits() -> bool:
+            nonlocal local_unpushed
+            if local_unpushed is None:
+                local_unpushed = bool(has_unpushed_commits and has_unpushed_commits(number))
+            return local_unpushed
+
+        if meta.get("pushCompletedAt"):
+            if not issue_has_unpushed_commits():
+                continue
+        if issue_last_exit_code(meta) != 0 and not meta.get("pushError") and not issue_has_unpushed_commits():
             continue
         if number in candidates:
             continue
@@ -646,32 +778,36 @@ def push_terminal_issues(
     state: dict[str, Any],
     now: int,
 ) -> None:
-    for number, issue in sorted(terminal_issue_candidates(issues, state, token, repo_path).items()):
+    for number, issue in sorted(
+        terminal_issue_candidates(
+            issues,
+            state,
+            token,
+            repo_path,
+            now,
+            has_unpushed_commits=lambda issue_number_value: has_unpushed_issue_commits(workspace, issue_number_value),
+        ).items()
+    ):
         meta = state.setdefault("issues", {}).setdefault(number, {})
-        if meta.get("pushCompletedAt") or meta.get("pushNoopAt"):
-            continue
         try:
             pushed = push_issue_commits(workspace, number)
         except Exception as error:  # noqa: BLE001 - persist failure so the next poll can retry.
             meta["pushError"] = str(error)
             meta["pushLastAttemptAt"] = now
+            meta["nextPushRetryAt"] = now + DEFAULT_PUSH_RETRY_BACKOFF_SECONDS
             log_line(f"push failed for issue #{number}: {error}", file=sys.stderr)
             continue
         meta["pushLastAttemptAt"] = now
+        meta.pop("nextPushRetryAt", None)
         meta.pop("pushError", None)
         if not pushed:
-            log_line(f"push skipped for issue #{number}: no unpushed CNB issue commits found")
+            if not meta.get("pushNoopAt"):
+                log_line(f"push skipped for issue #{number}: no unpushed CNB issue commits found")
+            meta["pushNoopAt"] = now
             continue
         meta["pushCompletedAt"] = now
-        meta["pushedRepos"] = [
-            {
-                "name": repo.name,
-                "branch": repo.branch,
-                "headSha": repo.head_sha,
-                "commits": repo.commits,
-            }
-            for repo in pushed
-        ]
+        meta.pop("pushNoopAt", None)
+        append_pushed_repo_records(meta, pushed)
         add_issue_comment(token, repo_path, number, render_pushed_comment(number, pushed))
         log_line(
             "pushed issue #"
@@ -765,6 +901,7 @@ def spawn_worker(args: argparse.Namespace, issue: dict[str, Any], token: str, re
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=sanitized_subprocess_env(),
     )
     state.setdefault("workers", {})[number] = {
         "pid": process.pid,
@@ -818,7 +955,14 @@ def worker_main(args: argparse.Namespace) -> int:
         log.write(f"codex model: {args.codex_model}\n")
         log.write(f"codex reasoning effort: {args.codex_reasoning_effort}\n")
         log.flush()
-        process = subprocess.run(command, input=prompt, text=True, stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.run(
+            command,
+            input=prompt,
+            text=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=sanitized_subprocess_env(),
+        )
         log.write(f"\n=== worker exit code {process.returncode} {log_timestamp()} ===\n")
     return process.returncode
 
@@ -843,6 +987,7 @@ def poll_once(args: argparse.Namespace) -> None:
             capacity_backoff_seconds=args.capacity_backoff_seconds,
             stale_worker_seconds=args.stale_worker_seconds,
         )
+        sync_inactive_running_issue_labels(token, repo_path, issues, state)
         if capacity <= 0:
             write_progress_summary(args.workspace, issues, state, now)
             save_state(path, state)

@@ -2,6 +2,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from automation import cnb_issue_runner as runner
 
@@ -35,6 +36,26 @@ class CnbIssueRunnerTest(unittest.TestCase):
 
         self.assertEqual([issue["number"] for issue in filtered], ["3"])
 
+    def test_labels_for_inactive_running_success_removes_running_label(self):
+        issue = {"number": "221", "labels": [{"name": "处理中"}, {"name": "ai:in-progress"}, {"name": "priority:P1"}]}
+        meta = {"lastExitCode": 0, "lastFinishedAt": 200}
+
+        labels = runner.labels_for_inactive_running_issue(issue, meta)
+
+        self.assertEqual(labels, ["priority:P1"])
+
+    def test_labels_for_paused_resource_error_requires_human(self):
+        issue = {"number": "222", "labels": [{"name": "处理中"}]}
+        meta = {
+            "paused": True,
+            "lastFinishedAt": 200,
+            "lastError": "ERROR: unexpected status 403 Forbidden: 订阅额度不足",
+        }
+
+        labels = runner.labels_for_inactive_running_issue(issue, meta)
+
+        self.assertEqual(labels, ["需人工确认"])
+
     def test_default_skip_labels_include_running_and_failed_states(self):
         self.assertIn("已处理", runner.DEFAULT_SKIP_LABELS)
         self.assertIn("处理中", runner.DEFAULT_SKIP_LABELS)
@@ -44,11 +65,27 @@ class CnbIssueRunnerTest(unittest.TestCase):
     def test_default_retry_backoffs_reduce_ai_retry_churn(self):
         self.assertEqual(runner.DEFAULT_RETRY_BACKOFF_SECONDS, 600)
         self.assertEqual(runner.DEFAULT_CAPACITY_BACKOFF_SECONDS, 1800)
+        self.assertEqual(runner.DEFAULT_PUSH_RETRY_BACKOFF_SECONDS, 600)
+
+    def test_default_max_concurrency_is_two_digits(self):
+        self.assertGreaterEqual(runner.DEFAULT_MAX_CONCURRENCY, 10)
 
     def test_format_log_line_prefixes_timestamp(self):
         line = runner.format_log_line("poll complete: open=1 candidates=0 capacity=7", now=0)
 
         self.assertRegex(line, r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} .+\] poll complete:")
+
+    def test_sanitized_subprocess_env_removes_malloc_debug_variables(self):
+        env = {
+            "PATH": "/bin",
+            "MallocStackLogging": "0",
+            "MallocStackLoggingNoCompact": "1",
+            "MallocNanoZone": "0",
+        }
+
+        sanitized = runner.sanitized_subprocess_env(env)
+
+        self.assertEqual(sanitized, {"PATH": "/bin"})
 
     def test_worker_slot_counts_reports_processing_and_idle_slots(self):
         state = {"workers": {"145": {"pid": 145}, "146": {"pid": 146}, "147": {"pid": 147}}}
@@ -157,6 +194,153 @@ class CnbIssueRunnerTest(unittest.TestCase):
             self.assertEqual(pushed[0].commits, [issue_commit])
             self.assertEqual(runner.unpushed_issue_commits(repo, "123"), [])
 
+    def test_push_terminal_issues_pushes_new_commit_after_previous_push(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin = root / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["git", "clone", str(origin), str(root / "ml-svc-zcode")], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            repo = root / "ml-svc-zcode"
+            run_git(repo, "config", "user.name", "Runner Test")
+            run_git(repo, "config", "user.email", "runner@example.invalid")
+            (repo / "README.md").write_text("initial\n", encoding="utf-8")
+            run_git(repo, "add", "README.md")
+            run_git(repo, "commit", "-m", "chore: initial")
+            run_git(repo, "push", "-u", "origin", "HEAD")
+
+            (repo / "README.md").write_text("initial\nfirst fix\n", encoding="utf-8")
+            run_git(repo, "add", "README.md")
+            run_git(repo, "commit", "-m", "fix: resolve CNB issue #190 第一次修复")
+            first_commit = run_git(repo, "rev-parse", "HEAD")
+            run_git(repo, "push", "origin", "HEAD")
+
+            (repo / "README.md").write_text("initial\nfirst fix\nsecond fix\n", encoding="utf-8")
+            run_git(repo, "add", "README.md")
+            run_git(repo, "commit", "-m", "fix: resolve CNB issue #190 第二次修复")
+            second_commit = run_git(repo, "rev-parse", "HEAD")
+
+            state = {
+                "issues": {
+                    "190": {
+                        "lastExitCode": 1,
+                        "lastError": "ERROR: unexpected status 503 Service Unavailable",
+                        "pushCompletedAt": 100,
+                        "pushedRepos": [
+                            {
+                                "name": "ml-svc-zcode",
+                                "branch": "master",
+                                "headSha": first_commit,
+                                "commits": [first_commit],
+                            }
+                        ],
+                    }
+                },
+                "workers": {},
+            }
+            issues = []
+
+            with (
+                patch.object(runner, "get_issue", return_value={"number": "190", "state": "closed", "labels": []}) as get_issue,
+                patch.object(runner, "add_issue_comment") as add_issue_comment,
+            ):
+                runner.push_terminal_issues(root, "token", "owner/repo", issues, state, now=200)
+
+            self.assertEqual(runner.unpushed_issue_commits(repo, "190"), [])
+            pushed_repos = state["issues"]["190"]["pushedRepos"]
+            self.assertEqual(len(pushed_repos), 2)
+            self.assertEqual(pushed_repos[0]["commits"], [first_commit])
+            self.assertEqual(pushed_repos[1]["commits"], [second_commit])
+            self.assertEqual(state["issues"]["190"]["pushCompletedAt"], 200)
+            get_issue.assert_called_once_with("token", "owner/repo", "190")
+            add_issue_comment.assert_called_once()
+
+    def test_unpushed_issue_commits_ignores_equivalent_cherry_picked_remote_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin = root / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["git", "clone", str(origin), str(root / "local")], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            local = root / "local"
+            run_git(local, "config", "user.name", "Runner Test")
+            run_git(local, "config", "user.email", "runner@example.invalid")
+            (local / "README.md").write_text("initial\n", encoding="utf-8")
+            run_git(local, "add", "README.md")
+            run_git(local, "commit", "-m", "chore: initial")
+            run_git(local, "push", "-u", "origin", "HEAD")
+
+            (local / "README.md").write_text("initial\nfix\n", encoding="utf-8")
+            run_git(local, "add", "README.md")
+            run_git(local, "commit", "-m", "fix: resolve CNB issue #194 等价修复")
+            local_commit = run_git(local, "rev-parse", "HEAD")
+
+            subprocess.run(["git", "clone", str(origin), str(root / "remote")], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            remote = root / "remote"
+            run_git(remote, "config", "user.name", "Runner Test")
+            run_git(remote, "config", "user.email", "runner@example.invalid")
+            (remote / "README.md").write_text("initial\nfix\n", encoding="utf-8")
+            run_git(remote, "add", "README.md")
+            run_git(remote, "commit", "-m", "fix: resolve CNB issue #194 等价修复")
+            run_git(remote, "push", "origin", "HEAD")
+            run_git(local, "fetch", "origin")
+
+            self.assertEqual(runner.unpushed_issue_commits(local, "194"), [])
+
+    def test_push_terminal_issues_backs_off_after_push_failure(self):
+        state = {
+            "issues": {
+                "191": {
+                    "lastExitCode": 0,
+                }
+            },
+            "workers": {},
+        }
+        issues = [{"number": "191", "state": "closed", "labels": []}]
+
+        with patch.object(runner, "push_issue_commits", side_effect=RuntimeError("fetch first")) as push_issue_commits:
+            runner.push_terminal_issues(Path("/tmp/workspace"), "token", "owner/repo", issues, state, now=300)
+
+        meta = state["issues"]["191"]
+        self.assertEqual(meta["pushLastAttemptAt"], 300)
+        self.assertEqual(meta["nextPushRetryAt"], 900)
+        self.assertIn("fetch first", meta["pushError"])
+        push_issue_commits.assert_called_once()
+
+        with patch.object(runner, "push_issue_commits") as push_issue_commits:
+            candidates = runner.terminal_issue_candidates(
+                issues,
+                state,
+                "token",
+                "owner/repo",
+                now=899,
+                has_unpushed_commits=lambda _number: True,
+            )
+
+        self.assertEqual(candidates, {})
+        push_issue_commits.assert_not_called()
+
+    def test_terminal_issue_candidates_skips_completed_issue_without_new_unpushed_commits(self):
+        state = {
+            "issues": {
+                "192": {
+                    "lastExitCode": 0,
+                    "pushCompletedAt": 200,
+                }
+            },
+            "workers": {},
+        }
+        issues = [{"number": "192", "state": "closed", "labels": []}]
+
+        candidates = runner.terminal_issue_candidates(
+            issues,
+            state,
+            "token",
+            "owner/repo",
+            now=300,
+            has_unpushed_commits=lambda _number: False,
+        )
+
+        self.assertEqual(candidates, {})
+
     def test_build_codex_command_passes_model_and_reasoning_effort(self):
         args = runner.parse_args(
             [
@@ -254,6 +438,13 @@ class CnbIssueRunnerTest(unittest.TestCase):
         )
 
         self.assertEqual(state["issues"]["7"]["nextRetryAt"], 2000)
+
+    def test_model_channel_errors_are_resource_errors(self):
+        self.assertTrue(
+            runner.is_resource_backoff_error(
+                "ERROR: unexpected status 503 Service Unavailable: no forced GPT backup channel supports group svip model gpt-5.5"
+            )
+        )
 
     def test_successful_worker_waits_before_non_terminal_retry(self):
         state = {
@@ -386,11 +577,13 @@ class CnbIssueRunnerTest(unittest.TestCase):
                 "7": {"nextRetryAt": 500, "title": "running issue"},
                 "8": {"nextRetryAt": 500, "title": "waiting issue"},
                 "9": {"nextRetryAt": 500, "title": "closed issue"},
+                "10": {"paused": True, "attempts": 3, "title": "done issue"},
             },
         }
         issues = [
             {"number": "7", "title": "running issue", "labels": [{"name": "处理中"}]},
             {"number": "8", "title": "waiting issue", "labels": [{"name": "处理中"}]},
+            {"number": "10", "title": "done issue", "labels": [{"name": "已处理"}]},
         ]
 
         summary = runner.render_progress_summary(issues, state, now=160)
@@ -398,6 +591,7 @@ class CnbIssueRunnerTest(unittest.TestCase):
         self.assertIn("#8 retry_in=340s", summary)
         self.assertNotIn("#7 retry_in", summary)
         self.assertNotIn("#9", summary)
+        self.assertNotIn("#10", summary)
 
     def test_available_capacity_waits_when_five_ai_workers_are_active(self):
         state = {
