@@ -177,6 +177,12 @@ def is_resource_backoff_error(message: str) -> bool:
         or "no active subscription" in lowered
         or "no forced gpt backup channel" in lowered
         or "403 forbidden" in lowered
+        or "502 bad gateway" in lowered
+        or "503 service unavailable" in lowered
+        or "service temporarily unavailable" in lowered
+        or "upstream request failed" in lowered
+        or "请求转发失败" in message
+        or "上游请求失败" in message
     )
 
 
@@ -557,9 +563,17 @@ def cnb_request(token: str, method: str, url: str, body: dict[str, Any] | None =
 
 
 def list_open_issues(token: str, repo_path: str) -> list[dict[str, Any]]:
-    url = f"https://api.cnb.cool/{repo_path}/-/issues?page=1&page_size=50&state=open"
-    issues = cnb_request(token, "GET", url)
-    return issues if isinstance(issues, list) else []
+    all_issues: list[dict[str, Any]] = []
+    page_size = 50
+    for page in range(1, 101):
+        url = f"https://api.cnb.cool/{repo_path}/-/issues?page={page}&page_size={page_size}&state=open"
+        issues = cnb_request(token, "GET", url)
+        if not isinstance(issues, list) or not issues:
+            break
+        all_issues.extend(issue for issue in issues if isinstance(issue, dict))
+        if len(issues) < page_size:
+            break
+    return all_issues
 
 
 def get_issue(token: str, repo_path: str, issue_number_value: str) -> dict[str, Any]:

@@ -446,6 +446,32 @@ class CnbIssueRunnerTest(unittest.TestCase):
             )
         )
 
+    def test_transient_proxy_errors_are_resource_errors(self):
+        for message in [
+            "ERROR: unexpected status 503 Service Unavailable: Service temporarily unavailable",
+            "ERROR: unexpected status 502 Bad Gateway: 请求转发失败: 上游请求失败: client error (Connect)",
+            "ERROR: unexpected status 502 Bad Gateway: Upstream request failed",
+        ]:
+            with self.subTest(message=message):
+                self.assertTrue(runner.is_resource_backoff_error(message))
+
+    def test_list_open_issues_fetches_all_pages(self):
+        page_one = [{"number": str(number), "labels": []} for number in range(1, 51)]
+        page_two = [{"number": "51", "labels": []}, {"number": "52", "labels": []}]
+
+        def fake_cnb_request(_token, _method, url):
+            if "page=1" in url:
+                return page_one
+            if "page=2" in url:
+                return page_two
+            return []
+
+        with patch.object(runner, "cnb_request", side_effect=fake_cnb_request):
+            issues = runner.list_open_issues("token", "owner/repo")
+
+        self.assertEqual(len(issues), 52)
+        self.assertEqual(issues[-1]["number"], "52")
+
     def test_successful_worker_waits_before_non_terminal_retry(self):
         state = {
             "workers": {
