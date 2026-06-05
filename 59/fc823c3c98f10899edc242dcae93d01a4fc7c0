@@ -1,0 +1,59 @@
+internal/runner/runner_test.go
+  s_caba4536ce182b::t_425a547772bce9 351-391,965,997-1002
+  s_caba4536ce182b::t_50bbe17cab897e 52-63
+  s_caba4536ce182b::t_2613230d0d4d4d 324,326,689
+  s_caba4536ce182b::t_7c3a00d3ed5dfe 6
+  s_caba4536ce182b::t_4720fed167b756 146,149-153,328,736,739
+  s_caba4536ce182b::t_fcea54ac141d2f 535-545,548-553,556-562
+  s_caba4536ce182b::t_3f471e14f4fc47 392-451
+  s_caba4536ce182b::t_902665ce3b7bdc 452-488
+  s_caba4536ce182b::t_68639e839d6d6d 546,554,885
+  s_caba4536ce182b::t_2299af1e9e59df 147-148,327,547,555,651,690,737-738
+  s_caba4536ce182b::t_93487640a9ccc9 884,886-887
+  s_caba4536ce182b::t_4baa01f726deb5 330
+internal/runner/runner.go
+  s_caba4536ce182b::t_dc405702523a2c 32,798
+  s_caba4536ce182b::t_762366093d21b7 441
+  s_caba4536ce182b::t_afc641fbb49d44 30,33,732,734-737,761
+  s_caba4536ce182b::t_78c42f090017fa 37,261-265,311-316
+  s_caba4536ce182b::t_9cb68e1d4340b0 473
+  s_caba4536ce182b::t_471aae07f4bbe9 466-467,472,474-475,478,495-521,540-542
+  s_caba4536ce182b::t_7976af1245224b 741,743-744,746,750-760,762-765,767-792,794,799-801
+  s_caba4536ce182b::t_cb1e58004d8ebf 745,747-749
+  s_caba4536ce182b::t_30248a590c1006 29,34-36,484-486,555-557,688,819-821,854
+  s_caba4536ce182b::t_8a30c4da4236d0 130
+  s_caba4536ce182b::t_954085d9efbc20 738-740,742
+  s_caba4536ce182b::t_7dc8fd2c2ad40e 127,414,450,487
+  s_caba4536ce182b::t_6232027bfcba89 121-123,463-465,468-471,476-477,591-606,676-680
+  s_caba4536ce182b::t_a089a6f66e44c8 31,733,766,793,795-797
+internal/config/config.go
+  s_caba4536ce182b::t_59b7b46c937a29 37
+internal/config/config_test.go
+  s_caba4536ce182b::t_44c47466ef5cd4 29,65-66
+templates/worker_prompt.md
+  s_caba4536ce182b::t_96e81da4eb9acf 1,26-27,56
+internal/gitops/manager.go
+  s_caba4536ce182b::t_4375e6137c1fac 42-61,100-106,152-154,175-181
+internal/gitops/manager_test.go
+  s_caba4536ce182b::t_fc4e9f87618a24 37-57,59-65,67-101
+  s_caba4536ce182b::t_59a6e6dfeb1181 58,263-280
+  s_caba4536ce182b::t_85059cb93953bf 66
+internal/integration/comments.go
+  s_caba4536ce182b::t_4d15e514a3da15 18,67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "59fc823c3c98f10899edc242dcae93d01a4fc7c0",
+  "prompts": {},
+  "sessions": {
+    "s_caba4536ce182b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e9049-8e7a-7270-a70c-a176a2edda85",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Your Name <you@example.com>"
+    }
+  }
+}
