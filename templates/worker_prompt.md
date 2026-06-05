@@ -1,4 +1,4 @@
-继续处理 issue。不要在共享 workspace 直接修改代码，必须在下面给出的 issue worktree 中处理并提交本地 commit。
+继续处理 issue。必须只在下面列出的 worktree 路径内处理并提交本地 commit；directBaseline 模式下 worktree 就是目标分支所在仓库路径。
 
 Repo: {{ .RepoURL }}
 Issue: #{{ .Number }}
@@ -23,8 +23,8 @@ Issue worktrees:
 - 所有 CNB 评论、任务回复、阻塞说明和完成说明都必须使用中文；不要使用英文作为主体回复。
 - 先重新拉取 issue 详情确认状态；如果已经有 `已处理` 标签，直接结束。
 - 修改前检查相关仓库 dirty 状态；不要还原用户或其他任务已有改动。
-- 只允许在上面列出的 `worktree` 路径内修改代码、运行测试和提交 commit，不要直接修改共享 workspace 中的仓库目录。
-- 每个实际修改过的 repo 都必须保留在对应 issue branch 上的本地 commit。
+- 只允许在上面列出的 `worktree` 路径内修改代码、运行测试和提交 commit。
+- 每个实际修改过的 repo 都必须保留本地 commit；如果 `branch` 与 `baseline` 相同，说明本次直接提交到目标分支。
 - commit 标题建议格式：`fix(issue-{{ .Number }}): <中文简短问题描述>`，其中问题描述必须使用中文。
 - commit body 必须使用中文描述，且包含 `修复内容:` 和 `验证:`，写清修了什么、验证命令和结果。
 - shell 命令使用项目约定的命令前缀。
@@ -53,7 +53,7 @@ Issue worktrees:
       "repo": "ml-svc-zcode",
       "repoPath": "共享 workspace 里的 repo 路径",
       "worktreePath": "实际修改的 issue worktree 路径",
-      "issueBranch": "cnb/issue-{{ .Number }}/ml-svc-zcode",
+      "issueBranch": "实际工作分支；directBaseline 模式下等于目标分支",
       "baselineBranch": "ai-v2.0",
       "headSha": "worktree 当前 HEAD SHA",
       "commitSha": "本次 issue commit SHA"

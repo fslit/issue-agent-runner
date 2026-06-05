@@ -15,7 +15,7 @@ type AgentInfo struct {
 
 func AwaitingVerifyComment(issue domain.Issue, state domain.IssueState, agent AgentInfo) string {
 	lines := []string{
-		fmt.Sprintf("问题 #%s 已合入本地验证环境，等待人工验证。", issue.Number),
+		fmt.Sprintf("问题 #%s 已合入并推送到目标分支，等待人工验证。", issue.Number),
 	}
 	lines = appendAgentInfo(lines, agent)
 	if state.Result != nil && state.Result.Summary != "" {
@@ -64,7 +64,7 @@ func MergeConflictComment(issue domain.Issue, state domain.IssueState, agent Age
 
 func RejectComment(issue domain.Issue, agent AgentInfo) string {
 	lines := []string{
-		fmt.Sprintf("问题 #%s 人工验证未通过。已回滚本地基准分支的合并提交，并将任务退回队列。", issue.Number),
+		fmt.Sprintf("问题 #%s 人工验证未通过。已回滚基准分支的合并提交并推送回滚结果，任务已退回队列。", issue.Number),
 	}
 	lines = appendAgentInfo(lines, agent)
 	return strings.Join(lines, "\n")

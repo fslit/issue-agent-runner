@@ -26,6 +26,7 @@ repositories:
     path: ml-web-zcode
     issueBranchPrefix: cnb
     baselineBranch: poc/api-adapter-validation
+    directBaseline: true
 provider:
   type: cnb
   repo: dianyuniot/mlink/ml-svc-zcode
@@ -61,6 +62,8 @@ paths:
 	require.Len(t, cfg.Repositories, 2)
 	require.Equal(t, filepath.Join(workspace, "ml-svc-zcode"), cfg.Repositories[0].Path)
 	require.Equal(t, "cnb", cfg.Repositories[0].IssueBranchPrefix)
+	require.False(t, cfg.Repositories[0].DirectBaseline)
+	require.True(t, cfg.Repositories[1].DirectBaseline)
 	require.Equal(t, filepath.Join(workspace, ".local_worktrees/issue-agent-runner"), cfg.Integration.WorktreeRoot)
 	require.Equal(t, "no-ff", cfg.Integration.MergeMode)
 	require.True(t, cfg.Integration.PushOnClose)

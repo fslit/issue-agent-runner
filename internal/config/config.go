@@ -34,6 +34,7 @@ type RepositoryConfig struct {
 	Path              string `yaml:"path"`
 	IssueBranchPrefix string `yaml:"issueBranchPrefix"`
 	BaselineBranch    string `yaml:"baselineBranch"`
+	DirectBaseline    bool   `yaml:"directBaseline"`
 }
 
 type ProviderConfig struct {

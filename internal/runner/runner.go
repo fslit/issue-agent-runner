@@ -26,6 +26,15 @@ import (
 	"issue-agent-runner/internal/state"
 )
 
+const (
+	legacyFailedLabel     = "ai:failed"
+	legacyDoneLabel       = "ai:fixed"
+	legacyQueuedLabel     = "ai:queued"
+	legacyRunningLabel    = "ai:in-progress"
+	readyToIntegrateLabel = "待集成"
+	awaitingVerifyLabel   = "待验证"
+)
+
 type Dependencies struct {
 	Config   *config.Config
 	Store    *state.Store
@@ -109,10 +118,16 @@ func (r *Runner) Once(ctx context.Context) error {
 		if err := r.pruneWorkers(ctx, st, now, handled); err != nil {
 			return err
 		}
+		if err := r.ensureAwaitingVerifyPushed(ctx, st); err != nil {
+			return err
+		}
 		if err := r.processClosedAwaitingVerify(ctx, st, now); err != nil {
 			return err
 		}
-		if err := r.processIntegrationQueue(ctx, issues, st, now); err != nil {
+		if err := r.processIntegrationQueue(ctx, issues, st, now, handled); err != nil {
+			return err
+		}
+		if err := r.syncKnownWorkflowLabels(ctx, issues, *st, handled); err != nil {
 			return err
 		}
 
@@ -243,6 +258,11 @@ func (r *Runner) claimAndStart(ctx context.Context, issue domain.Issue, st *doma
 	if r.dryRun {
 		return nil
 	}
+	if labelsToRemove := legacyClaimLabels(issue.Labels); len(labelsToRemove) > 0 {
+		if err := r.provider.RemoveLabels(ctx, issue.Number, labelsToRemove); err != nil {
+			return err
+		}
+	}
 	if err := r.provider.AddLabels(ctx, issue.Number, []string{r.cfg.Labels.Running}); err != nil {
 		return err
 	}
@@ -285,6 +305,15 @@ func (r *Runner) claimAndStart(ctx context.Context, issue domain.Issue, st *doma
 	st.Issues[issue.Number] = meta
 	r.logEvent("worker_started", map[string]any{"issue": issue.Number, "pid": worker.PID, "repos": len(taskRepos)})
 	r.runHook(ctx, "onIssueClaim", r.cfg.Hooks.OnIssueClaim, issue, meta)
+	return nil
+}
+
+func legacyClaimLabels(labels []string) []string {
+	for _, label := range labels {
+		if label == legacyFailedLabel {
+			return []string{legacyFailedLabel}
+		}
+	}
 	return nil
 }
 
@@ -382,7 +411,7 @@ func (r *Runner) prepareTaskRepositories(ctx context.Context, issueNumber string
 	return repos, nil
 }
 
-func (r *Runner) processIntegrationQueue(ctx context.Context, issues []domain.Issue, st *domain.State, now time.Time) error {
+func (r *Runner) processIntegrationQueue(ctx context.Context, issues []domain.Issue, st *domain.State, now time.Time, handled map[string]bool) error {
 	if r.gitOps == nil || hasAwaitingVerify(st) {
 		return nil
 	}
@@ -409,7 +438,7 @@ func (r *Runner) processIntegrationQueue(ctx context.Context, issues []domain.Is
 				meta.PauseReason = err.Error()
 				st.Issues[number] = meta
 				r.logEvent("merge_conflict", map[string]any{"issue": number, "repo": repoName, "files": append([]string(nil), conflictErr.Files...)})
-				if removeErr := r.provider.RemoveLabels(ctx, number, []string{r.cfg.Labels.Running}); removeErr != nil {
+				if removeErr := r.provider.RemoveLabels(ctx, number, workflowStateLabels(r.cfg.Labels)); removeErr != nil {
 					return removeErr
 				}
 				if addErr := r.provider.AddLabels(ctx, number, []string{r.cfg.Labels.NeedsHuman}); addErr != nil {
@@ -418,6 +447,7 @@ func (r *Runner) processIntegrationQueue(ctx context.Context, issues []domain.Is
 				if commentErr := r.provider.AddComment(ctx, number, integration.MergeConflictComment(issue, meta, r.agentInfo(meta))); commentErr != nil {
 					return commentErr
 				}
+				handled[number] = true
 				r.runHook(ctx, "onIssuePaused", r.cfg.Hooks.OnIssuePaused, issue, meta)
 				return nil
 			}
@@ -430,15 +460,63 @@ func (r *Runner) processIntegrationQueue(ctx context.Context, issues []domain.Is
 		r.logEvent("merged", map[string]any{"issue": number, "repo": repoName, "baseline": repoState.BaselineBranch, "commit": result.MergeCommit})
 	}
 
+	pushedRepos := make([]string, 0, len(mergedRepos))
+	for _, repoName := range mergedRepos {
+		repoState := meta.Repositories[repoName]
+		pushedSHA, err := r.gitOps.PushBaselineBranch(ctx, repoState.RepoPath, repoState.BaselineBranch)
+		if err != nil {
+			meta = r.rollbackMergedRepos(ctx, meta, mergedRepos)
+			if rollbackErr := r.pushRollbackRepos(ctx, meta, pushedRepos); rollbackErr != nil {
+				return rollbackErr
+			}
+			return err
+		}
+		repoState.PushedBaselineSHA = pushedSHA
+		meta.Repositories[repoName] = repoState
+		pushedRepos = append(pushedRepos, repoName)
+		r.logEvent("pushed_for_verification", map[string]any{"issue": number, "repo": repoName, "branch": repoState.BaselineBranch, "sha": pushedSHA})
+	}
+
 	meta.WorkflowStatus = domain.IssueWorkflowStatusAwaitingVerify
 	meta.IntegratedAt = now.Unix()
 	st.Issues[number] = meta
 	r.logEvent("awaiting_verify", map[string]any{"issue": number})
+	if err := r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusAwaitingVerify); err != nil {
+		return err
+	}
+	handled[number] = true
 	if err := r.writeCurrentValidationFiles(issues, *st); err != nil {
 		return err
 	}
 	r.runHook(ctx, "onIssueIntegrated", r.cfg.Hooks.OnIssueIntegrated, issue, meta)
 	return r.provider.AddComment(ctx, number, integration.AwaitingVerifyComment(issue, meta, r.agentInfo(meta)))
+}
+
+func (r *Runner) ensureAwaitingVerifyPushed(ctx context.Context, st *domain.State) error {
+	if r.gitOps == nil {
+		return nil
+	}
+	for number, meta := range st.Issues {
+		if meta.WorkflowStatus != domain.IssueWorkflowStatusAwaitingVerify {
+			continue
+		}
+		for _, repoName := range touchedRepoNames(meta) {
+			repoState := meta.Repositories[repoName]
+			if repoState.BaselineMergeCommit == "" || repoState.PushedBaselineSHA != "" {
+				continue
+			}
+			sha, err := r.gitOps.PushBaselineBranch(ctx, repoState.RepoPath, repoState.BaselineBranch)
+			if err != nil {
+				r.logEvent("push_failed", map[string]any{"issue": number, "repo": repoName, "error": err.Error()})
+				return err
+			}
+			repoState.PushedBaselineSHA = sha
+			meta.Repositories[repoName] = repoState
+			r.logEvent("pushed_for_verification", map[string]any{"issue": number, "repo": repoName, "branch": repoState.BaselineBranch, "sha": sha})
+		}
+		st.Issues[number] = meta
+	}
+	return nil
 }
 
 func (r *Runner) processClosedAwaitingVerify(ctx context.Context, st *domain.State, now time.Time) error {
@@ -459,6 +537,9 @@ func (r *Runner) processClosedAwaitingVerify(ctx context.Context, st *domain.Sta
 
 		for _, repoName := range touchedRepoNames(meta) {
 			repoState := meta.Repositories[repoName]
+			if repoState.PushedBaselineSHA != "" {
+				continue
+			}
 			sha, err := r.gitOps.PushBaselineBranch(ctx, repoState.RepoPath, repoState.BaselineBranch)
 			if err != nil {
 				r.logEvent("push_failed", map[string]any{"issue": number, "repo": repoName, "error": err.Error()})
@@ -471,6 +552,9 @@ func (r *Runner) processClosedAwaitingVerify(ctx context.Context, st *domain.Sta
 		meta.WorkflowStatus = domain.IssueWorkflowStatusClosedPushed
 		meta.ClosedAt = now.Unix()
 		st.Issues[number] = meta
+		if err := r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusClosedPushed); err != nil {
+			return err
+		}
 		if err := r.provider.AddComment(ctx, number, integration.ClosedPushedComment(issue, meta, r.agentInfo(meta))); err != nil {
 			return err
 		}
@@ -502,6 +586,22 @@ func (r *Runner) rollbackMergedRepos(ctx context.Context, meta domain.IssueState
 		meta.Repositories[repoName] = repoState
 	}
 	return meta
+}
+
+func (r *Runner) pushRollbackRepos(ctx context.Context, meta domain.IssueState, repoNames []string) error {
+	if r.gitOps == nil {
+		return nil
+	}
+	for _, repoName := range repoNames {
+		repoState := meta.Repositories[repoName]
+		sha, err := r.gitOps.PushBaselineBranch(ctx, repoState.RepoPath, repoState.BaselineBranch)
+		if err != nil {
+			return err
+		}
+		repoState.PushedBaselineSHA = sha
+		meta.Repositories[repoName] = repoState
+	}
+	return nil
 }
 
 func hasAwaitingVerify(st *domain.State) bool {
@@ -573,6 +673,11 @@ func (r *Runner) Reject(ctx context.Context, number string) error {
 			}
 			r.logEvent("reverted", map[string]any{"issue": number, "repo": repoName, "merge": repoState.BaselineMergeCommit})
 			repoState.BaselineMergeCommit = ""
+			pushedSHA, err := r.gitOps.PushBaselineBranch(ctx, repoState.RepoPath, repoState.BaselineBranch)
+			if err != nil {
+				return err
+			}
+			repoState.PushedBaselineSHA = pushedSHA
 			meta.Repositories[repoName] = repoState
 		}
 		meta.WorkflowStatus = domain.IssueWorkflowStatusUnknown
@@ -580,7 +685,7 @@ func (r *Runner) Reject(ctx context.Context, number string) error {
 		meta.ReadyAt = 0
 		meta.IntegratedAt = 0
 		st.Issues[number] = meta
-		if err := r.provider.RemoveLabels(ctx, number, []string{r.cfg.Labels.Running}); err != nil {
+		if err := r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusUnknown); err != nil {
 			return err
 		}
 		r.logEvent("issue_rejected", map[string]any{"issue": number})
@@ -624,6 +729,79 @@ func (r *Runner) agentInfo(meta domain.IssueState) integration.AgentInfo {
 	}
 }
 
+func (r *Runner) syncWorkflowLabels(ctx context.Context, number string, status domain.IssueWorkflowStatus) error {
+	remove := workflowStateLabels(r.cfg.Labels)
+	if err := r.provider.RemoveLabels(ctx, number, remove); err != nil {
+		return err
+	}
+
+	label := workflowStatusLabel(status)
+	if label == "" {
+		return nil
+	}
+	return r.provider.AddLabels(ctx, number, []string{label})
+}
+
+func (r *Runner) syncKnownWorkflowLabels(ctx context.Context, issues []domain.Issue, st domain.State, handled map[string]bool) error {
+	for _, issue := range issues {
+		if handled[issue.Number] {
+			continue
+		}
+		meta := st.Issues[issue.Number]
+		if err := r.syncKnownIssueWorkflowLabels(ctx, issue, meta.WorkflowStatus); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runner) syncKnownIssueWorkflowLabels(ctx context.Context, issue domain.Issue, status domain.IssueWorkflowStatus) error {
+	desired := workflowStatusLabel(status)
+	if desired == "" {
+		return nil
+	}
+
+	current := labelSet(issue.Labels)
+	remove := make([]string, 0)
+	for _, label := range workflowStateLabels(r.cfg.Labels) {
+		if label != desired && current[label] {
+			remove = append(remove, label)
+		}
+	}
+	if len(remove) > 0 {
+		if err := r.provider.RemoveLabels(ctx, issue.Number, remove); err != nil {
+			return err
+		}
+	}
+	if !current[desired] {
+		return r.provider.AddLabels(ctx, issue.Number, []string{desired})
+	}
+	return nil
+}
+
+func workflowStatusLabel(status domain.IssueWorkflowStatus) string {
+	switch status {
+	case domain.IssueWorkflowStatusReadyToIntegrate:
+		return readyToIntegrateLabel
+	case domain.IssueWorkflowStatusAwaitingVerify:
+		return awaitingVerifyLabel
+	default:
+		return ""
+	}
+}
+
+func workflowStateLabels(labels config.LabelConfig) []string {
+	return []string{
+		labels.Running,
+		labels.Done,
+		legacyDoneLabel,
+		legacyQueuedLabel,
+		legacyRunningLabel,
+		readyToIntegrateLabel,
+		awaitingVerifyLabel,
+	}
+}
+
 func (r *Runner) cleanupIssue(ctx context.Context, number string, st *domain.State, now time.Time) error {
 	if r.gitOps == nil {
 		return nil
@@ -638,6 +816,9 @@ func (r *Runner) cleanupIssue(ctx context.Context, number string, st *domain.Sta
 	meta.WorkflowStatus = domain.IssueWorkflowStatusCleaned
 	meta.CleanedAt = now.Unix()
 	st.Issues[number] = meta
+	if err := r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusCleaned); err != nil {
+		return err
+	}
 	r.logEvent("issue_cleaned", map[string]any{"issue": number})
 	return nil
 }
@@ -670,7 +851,7 @@ func (r *Runner) applySuccess(ctx context.Context, number string, worker domain.
 		fields["exit_code"] = *result.ExitCode
 	}
 	r.logEvent("worker_succeeded", fields)
-	return nil
+	return r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusReadyToIntegrate)
 }
 
 func (r *Runner) workerIsStale(worker domain.WorkerState, now time.Time) bool {

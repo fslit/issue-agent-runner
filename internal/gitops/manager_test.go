@@ -34,6 +34,71 @@ func TestPrepareIssueWorktreeCreatesBranchAndPath(t *testing.T) {
 	require.Equal(t, worktree.IssueBranch, current)
 }
 
+func TestPrepareIssueWorktreeDirectBaselineUsesRepositoryPath(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{
+		Name:           "ml-svc-zcode",
+		Path:           repoPath,
+		BaselineBranch: "ai-v2.0",
+		DirectBaseline: true,
+	}
+
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.NoError(t, err)
+	require.Equal(t, repoPath, worktree.WorktreePath)
+	require.Equal(t, repo.BaselineBranch, worktree.IssueBranch)
+
+	current, err := runGit(context.Background(), repoPath, "branch", "--show-current")
+	require.NoError(t, err)
+	require.Equal(t, repo.BaselineBranch, current)
+}
+
+func TestPrepareIssueWorktreeDirectBaselineRejectsDirtyWorkspace(t *testing.T) {
+	repoPath := createDirectTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{
+		Name:           "ml-svc-zcode",
+		Path:           repoPath,
+		BaselineBranch: "ai-v2.0",
+		DirectBaseline: true,
+	}
+	writeFile(t, filepath.Join(repoPath, "README.md"), "dirty\n")
+
+	_, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "direct baseline workspace")
+}
+
+func TestMergeIssueBranchReturnsHeadWhenIssueBranchIsBaseline(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+
+	writeFile(t, filepath.Join(repoPath, "feature.txt"), "direct baseline change\n")
+	_, err := runGit(context.Background(), repoPath, "add", "feature.txt")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "commit", "-m", "fix(issue-77): direct baseline")
+	require.NoError(t, err)
+	head, err := runGit(context.Background(), repoPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	result, err := manager.MergeIssueBranch(context.Background(), repoPath, "ai-v2.0", "ai-v2.0", "no-ff")
+	require.NoError(t, err)
+	require.Equal(t, head, result.MergeCommit)
+}
+
+func TestCleanupIssueWorktreeSkipsRepositoryPath(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+
+	err := manager.CleanupIssueWorktree(context.Background(), repoPath, repoPath, "ai-v2.0")
+	require.NoError(t, err)
+
+	branches, err := runGit(context.Background(), repoPath, "branch", "--list", "ai-v2.0")
+	require.NoError(t, err)
+	require.NotEmpty(t, branches)
+}
+
 func TestMergeIssueBranchReturnsMergeCommit(t *testing.T) {
 	repoPath := createTestRepo(t)
 	manager := New()
@@ -190,6 +255,29 @@ func createTestRepo(t *testing.T) string {
 	_, err = runGit(context.Background(), repoPath, "branch", "-M", "ai-v2.0")
 	require.NoError(t, err)
 	_, err = runGit(context.Background(), repoPath, "push", "-u", "origin", "ai-v2.0")
+	require.NoError(t, err)
+
+	return repoPath
+}
+
+func createDirectTestRepo(t *testing.T) string {
+	t.Helper()
+
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repoPath, 0o755))
+	_, err := runGit(context.Background(), repoPath, "init")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "config", "user.name", "Issue Agent Runner")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "config", "user.email", "runner@example.com")
+	require.NoError(t, err)
+
+	writeFile(t, filepath.Join(repoPath, "README.md"), "hello\n")
+	_, err = runGit(context.Background(), repoPath, "add", "README.md")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "commit", "-m", "chore: initial commit")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "branch", "-M", "ai-v2.0")
 	require.NoError(t, err)
 
 	return repoPath

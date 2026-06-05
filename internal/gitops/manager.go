@@ -39,6 +39,26 @@ func (e *MergeConflictError) Error() string {
 }
 
 func (m *Manager) PrepareIssueWorktree(ctx context.Context, worktreeRoot string, issueNumber string, repo config.RepositoryConfig) (domain.TaskRepository, error) {
+	if repo.DirectBaseline {
+		if _, err := m.runCmd(ctx, repo.Path, "checkout", repo.BaselineBranch); err != nil {
+			return domain.TaskRepository{}, err
+		}
+		status, err := m.runCmd(ctx, repo.Path, "status", "--porcelain")
+		if err != nil {
+			return domain.TaskRepository{}, err
+		}
+		if strings.TrimSpace(status) != "" {
+			return domain.TaskRepository{}, fmt.Errorf("direct baseline workspace %s is dirty", repo.Path)
+		}
+		return domain.TaskRepository{
+			Name:           repo.Name,
+			Path:           repo.Path,
+			WorktreePath:   repo.Path,
+			IssueBranch:    repo.BaselineBranch,
+			BaselineBranch: repo.BaselineBranch,
+		}, nil
+	}
+
 	branch := issueBranchName(issueNumber, repo)
 	worktreePath := filepath.Join(worktreeRoot, "issue-"+issueNumber, repo.Name)
 
@@ -76,6 +96,13 @@ func (m *Manager) MergeIssueBranch(ctx context.Context, repoPath string, baselin
 	}
 	if _, err := m.runCmd(ctx, repoPath, "checkout", baselineBranch); err != nil {
 		return MergeResult{}, err
+	}
+	if issueBranch == baselineBranch {
+		head, err := m.revParse(ctx, repoPath, "HEAD")
+		if err != nil {
+			return MergeResult{}, err
+		}
+		return MergeResult{MergeCommit: head}, nil
 	}
 
 	mergeArgs := []string{"merge", "--no-edit"}
@@ -122,6 +149,9 @@ func (m *Manager) PushBaselineBranch(ctx context.Context, repoPath string, basel
 }
 
 func (m *Manager) CleanupIssueWorktree(ctx context.Context, repoPath string, worktreePath string, issueBranch string) error {
+	if samePath(repoPath, worktreePath) {
+		return nil
+	}
 	if _, err := os.Stat(worktreePath); err == nil {
 		if _, err := m.runCmd(ctx, repoPath, "worktree", "remove", "--force", worktreePath); err != nil {
 			return err
@@ -140,6 +170,15 @@ func (m *Manager) CleanupIssueWorktree(ctx context.Context, repoPath string, wor
 		return err
 	}
 	return nil
+}
+
+func samePath(left string, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
 }
 
 func (m *Manager) revParse(ctx context.Context, repoPath string, ref string) (string, error) {

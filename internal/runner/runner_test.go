@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,6 +47,18 @@ func TestOnceClaimsCandidateStartsWorkerAndWritesReports(t *testing.T) {
 	require.Equal(t, "7", started["issue"])
 	require.EqualValues(t, 7007, started["pid"])
 	require.EqualValues(t, 2, started["repos"])
+}
+
+func TestOnceRemovesLegacyFailedLabelWhenClaimingCandidate(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	env.provider.issues = []domain.Issue{{Number: "7", Title: "retry issue", State: "open", Labels: []string{"ai:failed"}}}
+	env.executor.startWorker = domain.WorkerState{IssueNumber: "7", PID: 7007, Title: "retry issue", StartedAt: env.now.Unix()}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	require.Equal(t, []labelCall{{number: "7", labels: []string{"ai:failed"}}}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{{number: "7", labels: []string{"处理中"}}}, env.provider.addedLabels)
 }
 
 func TestOnceRunsClaimAndProgressHooks(t *testing.T) {
@@ -130,7 +143,14 @@ func TestOnceRecordsFinishedWorkerSuccess(t *testing.T) {
 	require.Equal(t, "head-7", loaded.Issues["7"].Repositories["ml-svc-zcode"].IssueHeadSHA)
 	require.Equal(t, "commit-7", loaded.Issues["7"].Repositories["ml-svc-zcode"].CommitSHA)
 	require.Equal(t, "merge-ml-svc-zcode", loaded.Issues["7"].Repositories["ml-svc-zcode"].BaselineMergeCommit)
-	require.Empty(t, env.provider.removedLabels)
+	require.Equal(t, []labelCall{
+		workflowCleanupLabelCall("7"),
+		workflowCleanupLabelCall("7"),
+	}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{
+		{number: "7", labels: []string{"待集成"}},
+		{number: "7", labels: []string{"待验证"}},
+	}, env.provider.addedLabels)
 	require.Len(t, env.provider.comments, 1)
 	require.Contains(t, env.provider.comments[0], "Model: `gpt-5.5` (reasoning: `xhigh`)")
 }
@@ -301,9 +321,13 @@ func TestOnceIntegratesReadyIssueAndMarksAwaitingVerify(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, domain.IssueWorkflowStatusAwaitingVerify, loaded.Issues["7"].WorkflowStatus)
 	require.Equal(t, "merge-7", loaded.Issues["7"].Repositories["ml-svc-zcode"].BaselineMergeCommit)
+	require.Equal(t, "push-ml-svc-zcode", loaded.Issues["7"].Repositories["ml-svc-zcode"].PushedBaselineSHA)
 	require.Equal(t, []string{"ml-svc-zcode:cnb/issue-7/ml-svc-zcode"}, env.gitOps.merged)
+	require.Equal(t, []string{"ml-svc-zcode:ai-v2.0"}, env.gitOps.pushed)
+	require.Equal(t, []labelCall{workflowCleanupLabelCall("7")}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{{number: "7", labels: []string{"待验证"}}}, env.provider.addedLabels)
 	require.Len(t, env.provider.comments, 1)
-	require.Contains(t, env.provider.comments[0], "已合入本地验证环境")
+	require.Contains(t, env.provider.comments[0], "已合入并推送到目标分支")
 	require.Contains(t, env.provider.comments[0], "Model: `gpt-5.5` (reasoning: `xhigh`)")
 	currentValidationMarkdown := filepath.Join(env.stateDir, "current-validation.md")
 	currentValidationJSON := filepath.Join(env.stateDir, "current-validation.json")
@@ -322,6 +346,144 @@ func TestOnceIntegratesReadyIssueAndMarksAwaitingVerify(t *testing.T) {
 	hookOutput, err := os.ReadFile(integratedHookPath)
 	require.NoError(t, err)
 	require.Equal(t, "integrated:7", string(hookOutput))
+}
+
+func TestOnceRollsBackMergeWhenPushForVerificationFails(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"7": {
+				Title:          "ready issue",
+				WorkflowStatus: domain.IssueWorkflowStatusReadyToIntegrate,
+				ReadyAt:        env.now.Unix() - 10,
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-svc-zcode": {
+						Repo:           "ml-svc-zcode",
+						RepoPath:       filepath.Join(env.stateDir, "ml-svc-zcode"),
+						IssueBranch:    "cnb/issue-7/ml-svc-zcode",
+						BaselineBranch: "ai-v2.0",
+						CommitSHA:      "commit-7",
+					},
+				},
+			},
+		},
+	}))
+	env.provider.issues = []domain.Issue{{Number: "7", Title: "ready issue", State: "open"}}
+	env.gitOps.mergeResults = map[string]gitops.MergeResult{
+		"ml-svc-zcode": {MergeCommit: "merge-7"},
+	}
+	env.gitOps.pushErrs = map[string]error{
+		"ml-svc-zcode": errors.New("push failed"),
+	}
+
+	err := env.runner.Once(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "push failed")
+
+	loaded, loadErr := env.store.Load()
+	require.NoError(t, loadErr)
+	require.Equal(t, domain.IssueWorkflowStatusReadyToIntegrate, loaded.Issues["7"].WorkflowStatus)
+	require.Equal(t, []string{"ml-svc-zcode:cnb/issue-7/ml-svc-zcode"}, env.gitOps.merged)
+	require.Equal(t, []string{"ml-svc-zcode:merge-7"}, env.gitOps.reverted)
+}
+
+func TestOncePushesRollbackWhenSecondRepositoryPushFails(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"7": {
+				Title:          "ready issue",
+				WorkflowStatus: domain.IssueWorkflowStatusReadyToIntegrate,
+				ReadyAt:        env.now.Unix() - 10,
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-svc-zcode": {
+						Repo:           "ml-svc-zcode",
+						RepoPath:       filepath.Join(env.stateDir, "ml-svc-zcode"),
+						IssueBranch:    "cnb/issue-7/ml-svc-zcode",
+						BaselineBranch: "ai-v2.0",
+						CommitSHA:      "commit-7-svc",
+					},
+					"ml-web-zcode": {
+						Repo:           "ml-web-zcode",
+						RepoPath:       filepath.Join(env.stateDir, "ml-web-zcode"),
+						IssueBranch:    "cnb/issue-7/ml-web-zcode",
+						BaselineBranch: "poc/api-adapter-validation",
+						CommitSHA:      "commit-7-web",
+					},
+				},
+			},
+		},
+	}))
+	env.provider.issues = []domain.Issue{{Number: "7", Title: "ready issue", State: "open"}}
+	env.gitOps.mergeResults = map[string]gitops.MergeResult{
+		"ml-svc-zcode": {MergeCommit: "merge-svc"},
+		"ml-web-zcode": {MergeCommit: "merge-web"},
+	}
+	env.gitOps.pushErrs = map[string]error{
+		"ml-web-zcode": errors.New("web push failed"),
+	}
+
+	err := env.runner.Once(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "web push failed")
+
+	loaded, loadErr := env.store.Load()
+	require.NoError(t, loadErr)
+	require.Equal(t, domain.IssueWorkflowStatusReadyToIntegrate, loaded.Issues["7"].WorkflowStatus)
+	require.Equal(t, []string{
+		"ml-svc-zcode:cnb/issue-7/ml-svc-zcode",
+		"ml-web-zcode:cnb/issue-7/ml-web-zcode",
+	}, env.gitOps.merged)
+	require.Equal(t, []string{
+		"ml-svc-zcode:merge-svc",
+		"ml-web-zcode:merge-web",
+	}, env.gitOps.reverted)
+	require.Equal(t, []string{
+		"ml-svc-zcode:ai-v2.0",
+		"ml-web-zcode:poc/api-adapter-validation",
+		"ml-svc-zcode:ai-v2.0",
+	}, env.gitOps.pushed)
+}
+
+func TestOncePushesExistingAwaitingVerifyIssueForRemoteValidation(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"7": {
+				WorkflowStatus: domain.IssueWorkflowStatusAwaitingVerify,
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-svc-zcode": {
+						Repo:                "ml-svc-zcode",
+						RepoPath:            filepath.Join(env.stateDir, "ml-svc-zcode"),
+						IssueBranch:         "cnb/issue-7/ml-svc-zcode",
+						BaselineBranch:      "ai-v2.0",
+						BaselineMergeCommit: "merge-7",
+						CommitSHA:           "commit-7",
+					},
+				},
+			},
+		},
+	}))
+	env.provider.issues = []domain.Issue{{Number: "7", Title: "verify issue", State: "open"}}
+	env.provider.getIssues = map[string]domain.Issue{
+		"7": {Number: "7", Title: "verify issue", State: "open"},
+	}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	loaded, loadErr := env.store.Load()
+	require.NoError(t, loadErr)
+	require.Equal(t, domain.IssueWorkflowStatusAwaitingVerify, loaded.Issues["7"].WorkflowStatus)
+	require.Equal(t, "push-ml-svc-zcode", loaded.Issues["7"].Repositories["ml-svc-zcode"].PushedBaselineSHA)
+	require.Equal(t, []string{"ml-svc-zcode:ai-v2.0"}, env.gitOps.pushed)
+	require.Equal(t, []labelCall{{number: "7", labels: []string{"待验证"}}}, env.provider.addedLabels)
 }
 
 func TestOnceContinuesWhenIntegratedHookFails(t *testing.T) {
@@ -368,6 +530,34 @@ func TestOnceContinuesWhenIntegratedHookFails(t *testing.T) {
 	require.Equal(t, "7", failed["issue"])
 	require.Contains(t, failed["error"], "exit status 42")
 	require.Contains(t, failed["output"], "hook-boom")
+}
+
+func TestOnceSyncsExistingWorkflowLabels(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"7": {WorkflowStatus: domain.IssueWorkflowStatusReadyToIntegrate},
+			"8": {WorkflowStatus: domain.IssueWorkflowStatusAwaitingVerify},
+		},
+	}))
+	env.provider.issues = []domain.Issue{
+		{Number: "7", Title: "ready issue", State: "open", Labels: []string{"已处理", "ai:fixed", "ai:queued", "ai:in-progress", "priority:P2"}},
+		{Number: "8", Title: "verify issue", State: "open", Labels: []string{"处理中", "已处理", "待集成"}},
+	}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	require.Equal(t, []labelCall{
+		{number: "7", labels: []string{"已处理", "ai:fixed", "ai:queued", "ai:in-progress"}},
+		{number: "8", labels: []string{"处理中", "已处理", "待集成"}},
+	}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{
+		{number: "7", labels: []string{"待集成"}},
+		{number: "8", labels: []string{"待验证"}},
+	}, env.provider.addedLabels)
 }
 
 func TestRunHookPostsConfiguredWebhook(t *testing.T) {
@@ -458,7 +648,7 @@ func TestOnceMarksNeedsHumanOnMergeConflict(t *testing.T) {
 	require.Equal(t, domain.IssueWorkflowStatusMergeConflict, loaded.Issues["7"].WorkflowStatus)
 	require.True(t, loaded.Issues["7"].Paused)
 	require.Equal(t, []string{"internal/logic/flow/instance.go"}, loaded.Issues["7"].Repositories["ml-svc-zcode"].ConflictFiles)
-	require.Equal(t, []labelCall{{number: "7", labels: []string{"处理中"}}}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{workflowCleanupLabelCall("7")}, env.provider.removedLabels)
 	require.Equal(t, []labelCall{{number: "7", labels: []string{"需人工确认"}}}, env.provider.addedLabels)
 	require.Len(t, env.provider.comments, 1)
 	require.Contains(t, env.provider.comments[0], "无法自动合入基准分支")
@@ -496,7 +686,8 @@ func TestRejectRevertsAwaitingVerifyIssue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, domain.IssueWorkflowStatusUnknown, loaded.Issues["7"].WorkflowStatus)
 	require.Equal(t, []string{"ml-svc-zcode:merge-7"}, env.gitOps.reverted)
-	require.Equal(t, []labelCall{{number: "7", labels: []string{"处理中"}}}, env.provider.removedLabels)
+	require.Equal(t, []string{"ml-svc-zcode:ai-v2.0"}, env.gitOps.pushed)
+	require.Equal(t, []labelCall{workflowCleanupLabelCall("7")}, env.provider.removedLabels)
 	require.Len(t, env.provider.comments, 1)
 	require.Contains(t, env.provider.comments[0], "人工验证未通过")
 	require.Contains(t, env.provider.comments[0], "Model: `gpt-5.5` (reasoning: `xhigh`)")
@@ -542,6 +733,10 @@ func TestOncePushesClosedAwaitingVerifyIssueAndCleansUp(t *testing.T) {
 	require.Equal(t, "push-ml-svc-zcode", loaded.Issues["7"].Repositories["ml-svc-zcode"].PushedBaselineSHA)
 	require.Equal(t, []string{"ml-svc-zcode:ai-v2.0"}, env.gitOps.pushed)
 	require.Equal(t, []string{"ml-svc-zcode:cnb/issue-7/ml-svc-zcode"}, env.gitOps.cleaned)
+	require.Equal(t, []labelCall{
+		workflowCleanupLabelCall("7"),
+		workflowCleanupLabelCall("7"),
+	}, env.provider.removedLabels)
 	require.Len(t, env.provider.comments, 1)
 	require.Contains(t, env.provider.comments[0], "基准分支已推送")
 	require.Contains(t, env.provider.comments[0], "Model: `gpt-5.5` (reasoning: `xhigh`)")
@@ -686,6 +881,10 @@ type labelCall struct {
 	labels []string
 }
 
+func workflowCleanupLabelCall(number string) labelCall {
+	return labelCall{number: number, labels: []string{"处理中", "已处理", "ai:fixed", "ai:queued", "ai:in-progress", "待集成", "待验证"}}
+}
+
 type fakeProvider struct {
 	issues        []domain.Issue
 	getIssues     map[string]domain.Issue
@@ -763,6 +962,7 @@ type fakeGitOps struct {
 	cleaned      []string
 	mergeResults map[string]gitops.MergeResult
 	mergeErrs    map[string]error
+	pushErrs     map[string]error
 }
 
 func (f *fakeGitOps) PrepareIssueWorktree(ctx context.Context, worktreeRoot string, issueNumber string, repo config.RepositoryConfig) (domain.TaskRepository, error) {
@@ -794,8 +994,12 @@ func (f *fakeGitOps) RevertMergeCommit(ctx context.Context, repoPath string, bas
 }
 
 func (f *fakeGitOps) PushBaselineBranch(ctx context.Context, repoPath string, baselineBranch string) (string, error) {
-	f.pushed = append(f.pushed, filepath.Base(repoPath)+":"+baselineBranch)
-	return "push-" + filepath.Base(repoPath), nil
+	repoName := filepath.Base(repoPath)
+	f.pushed = append(f.pushed, repoName+":"+baselineBranch)
+	if err := f.pushErrs[repoName]; err != nil {
+		return "", err
+	}
+	return "push-" + repoName, nil
 }
 
 func (f *fakeGitOps) CleanupIssueWorktree(ctx context.Context, repoPath string, worktreePath string, issueBranch string) error {
