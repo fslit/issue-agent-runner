@@ -1,0 +1,27 @@
+automation/cnb_issue_runner.py
+  s_caba4536ce182b::t_6eca177f176ec1 126-138,1077-1078
+  s_caba4536ce182b::t_6e3ddd65f475d2 403-404
+  s_caba4536ce182b::t_e17171cfc61c2a 31-33,100-103,105,109-110,117-125,500,796-807,1013
+  s_caba4536ce182b::t_5689031461d81e 50-53,682-716,745-746
+automation/test_cnb_issue_runner.py
+  s_caba4536ce182b::t_f21166d965a7c7 39-97,118-134
+  s_caba4536ce182b::t_a957b7e70bce56 265,288,292-312
+  s_caba4536ce182b::t_1033b325165a7d 323
+  s_caba4536ce182b::t_76987c85cad42b 136-151
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "aada103f78c2c65eba4a937ad0133735b257fb2a",
+  "prompts": {},
+  "sessions": {
+    "s_caba4536ce182b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e9049-8e7a-7270-a70c-a176a2edda85",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Your Name <you@example.com>"
+    }
+  }
+}
