@@ -28,7 +28,9 @@ RUNNING_LABEL_ALIASES = {RUNNING_LABEL, "ai:in-progress"}
 FAILED_LABEL = "处理失败"
 NEEDS_HUMAN_LABEL = "需人工确认"
 DONE_LABEL = "已处理"
-DEFAULT_SKIP_LABELS = {DONE_LABEL, RUNNING_LABEL, FAILED_LABEL, NEEDS_HUMAN_LABEL}
+LEGACY_WORKFLOW_LABELS = {"待集成", "待验证"}
+LEGACY_COMPLETED_WORKFLOW_STATUSES = {"READY_TO_INTEGRATE", "AWAITING_VERIFY", "RUNNING"}
+DEFAULT_SKIP_LABELS = RUNNING_LABEL_ALIASES | {DONE_LABEL, FAILED_LABEL, NEEDS_HUMAN_LABEL}
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 600
 DEFAULT_CAPACITY_BACKOFF_SECONDS = 1800
@@ -44,6 +46,10 @@ MALLOC_DEBUG_ENV_KEYS = {
     "MallocNanoZone",
     "MallocCheckHeapStart",
     "MallocCheckHeapEach",
+}
+REQUIRED_PUSH_BRANCHES = {
+    "ml-svc-zcode": "ai-v2.0",
+    "ml-web-zcode": "poc/api-adapter-validation",
 }
 
 
@@ -91,16 +97,43 @@ def issue_label_names(issue: dict[str, Any]) -> set[str]:
 
 def labels_for_inactive_running_issue(issue: dict[str, Any], meta: dict[str, Any]) -> list[str] | None:
     labels = issue_label_names(issue)
-    if labels.isdisjoint(RUNNING_LABEL_ALIASES):
+    should_clean_legacy = bool(meta.get("pushCompletedAt")) or DONE_LABEL in labels
+    has_running_label = not labels.isdisjoint(RUNNING_LABEL_ALIASES)
+    has_legacy_label = not labels.isdisjoint(LEGACY_WORKFLOW_LABELS)
+    if not has_running_label and not (should_clean_legacy and has_legacy_label):
         return None
-    if not meta.get("paused") and not meta.get("lastFinishedAt"):
+    if has_running_label and not meta.get("paused") and not meta.get("lastFinishedAt") and not should_clean_legacy:
         return None
 
     labels.difference_update(RUNNING_LABEL_ALIASES)
+    if should_clean_legacy:
+        labels.difference_update(LEGACY_WORKFLOW_LABELS)
     if meta.get("paused"):
         error = str(meta.get("lastError", ""))
         labels.add(NEEDS_HUMAN_LABEL if is_resource_backoff_error(error) else FAILED_LABEL)
     return sorted(labels)
+
+
+def cleanup_legacy_workflow_status(meta: dict[str, Any]) -> bool:
+    if not meta.get("pushCompletedAt"):
+        return False
+    if meta.get("workflowStatus") not in LEGACY_COMPLETED_WORKFLOW_STATUSES:
+        return False
+    meta.pop("workflowStatus", None)
+    return True
+
+
+def cleanup_legacy_workflow_statuses(state: dict[str, Any]) -> list[str]:
+    cleaned: list[str] = []
+    issue_meta = state.get("issues", {})
+    if not isinstance(issue_meta, dict):
+        return cleaned
+    for number, meta in issue_meta.items():
+        if not isinstance(meta, dict):
+            continue
+        if cleanup_legacy_workflow_status(meta):
+            cleaned.append(str(number))
+    return cleaned
 
 
 def filter_processable_issues(issues: list[dict[str, Any]], skip_labels: set[str]) -> list[dict[str, Any]]:
@@ -367,6 +400,8 @@ def sync_inactive_running_issue_labels(
         meta = issue_meta.get(number, {}) if isinstance(issue_meta, dict) else {}
         if not isinstance(meta, dict):
             continue
+        if cleanup_legacy_workflow_status(meta):
+            log_line(f"cleaned legacy workflow status for issue #{number}")
         labels = labels_for_inactive_running_issue(issue, meta)
         if labels is None or set(labels) == issue_label_names(issue):
             continue
@@ -462,7 +497,7 @@ def issue_is_processable(
             return False
     if labels.isdisjoint(skip_labels):
         return is_issue_retry_ready(issue, state, now)
-    if RUNNING_LABEL in labels and isinstance(meta, dict) and int(meta.get("attempts", 0) or 0) > 0:
+    if not labels.isdisjoint(RUNNING_LABEL_ALIASES) and isinstance(meta, dict) and int(meta.get("attempts", 0) or 0) > 0:
         return is_issue_retry_ready(issue, state, now)
     return False
 
@@ -644,6 +679,41 @@ def current_git_head(repo_path: Path) -> str:
     return run_git(repo_path, ["rev-parse", "HEAD"]).stdout.strip()
 
 
+def validate_push_branch(repo_path: Path, branch: str) -> None:
+    repo_name = git_repo_name(repo_path)
+    expected_branch = REQUIRED_PUSH_BRANCHES.get(repo_name)
+    if expected_branch and branch != expected_branch:
+        raise RunnerError(f"refusing to push {repo_name} from branch {branch}; expected {expected_branch}")
+
+
+def unpushed_commits(repo_path: Path) -> list[str]:
+    result = run_git(
+        repo_path,
+        [
+            "log",
+            "--cherry-pick",
+            "--right-only",
+            "--format=%H",
+            "@{upstream}...HEAD",
+        ],
+        check=False,
+    )
+    if result.returncode not in {0, 1}:
+        raise RunnerError(f"failed to inspect unpushed commits in {repo_path}: {result.stderr.strip()}")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def validate_issue_push_scope(repo_path: Path, branch: str, issue_number_value: str, issue_commits: list[str]) -> None:
+    issue_commit_set = set(issue_commits)
+    unrelated_commits = [commit for commit in unpushed_commits(repo_path) if commit not in issue_commit_set]
+    if unrelated_commits:
+        repo_name = git_repo_name(repo_path)
+        raise RunnerError(
+            f"refusing to push {repo_name}:{branch} for CNB issue #{issue_number_value}; "
+            f"found {len(unrelated_commits)} unrelated unpushed commits"
+        )
+
+
 def unpushed_issue_commits(repo_path: Path, issue_number_value: str) -> list[str]:
     pattern = f"CNB issue #{issue_number_value}"
     result = run_git(
@@ -672,6 +742,8 @@ def push_issue_commits(workspace: Path, issue_number_value: str) -> list[PushedR
         if not commits:
             continue
         branch = current_git_branch(repo_path)
+        validate_push_branch(repo_path, branch)
+        validate_issue_push_scope(repo_path, branch, issue_number_value, commits)
         run_git(repo_path, ["push", "origin", branch])
         pushed.append(
             PushedRepo(
@@ -719,6 +791,18 @@ def append_pushed_repo_records(meta: dict[str, Any], pushed: list[PushedRepo]) -
         existing = []
     existing.extend(pushed_repo_records(pushed))
     meta["pushedRepos"] = existing
+
+
+def clear_push_state(meta: dict[str, Any]) -> None:
+    for key in [
+        "pushCompletedAt",
+        "pushLastAttemptAt",
+        "pushNoopAt",
+        "nextPushRetryAt",
+        "pushError",
+        "pushedRepos",
+    ]:
+        meta.pop(key, None)
 
 
 def issue_last_exit_code(meta: dict[str, Any]) -> int:
@@ -926,6 +1010,7 @@ def spawn_worker(args: argparse.Namespace, issue: dict[str, Any], token: str, re
         "codexReasoningEffort": args.codex_reasoning_effort,
     }
     meta = state.setdefault("issues", {}).setdefault(number, {})
+    clear_push_state(meta)
     started_at = int(time.time())
     meta["title"] = issue.get("title", "")
     meta["lastStartedAt"] = started_at
@@ -989,6 +1074,8 @@ def poll_once(args: argparse.Namespace) -> None:
         now = int(time.time())
         path = state_file(args.workspace)
         state = load_state(path)
+        for number in cleanup_legacy_workflow_statuses(state):
+            log_line(f"cleaned legacy workflow status for issue #{number}")
         issues = list_open_issues(token, repo_path)
         remove_terminal_issue_workers(state, issues, terminal_labels={"已处理"})
         push_terminal_issues(args.workspace, token, repo_path, issues, state, now)

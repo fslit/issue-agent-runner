@@ -36,6 +36,65 @@ class CnbIssueRunnerTest(unittest.TestCase):
 
         self.assertEqual([issue["number"] for issue in filtered], ["3"])
 
+    def test_default_skip_labels_include_running_aliases(self):
+        self.assertTrue(runner.RUNNING_LABEL_ALIASES.issubset(runner.DEFAULT_SKIP_LABELS))
+
+    def test_issue_is_processable_skips_in_progress_alias_without_attempts(self):
+        issue = {"number": "248", "title": "running alias", "labels": [{"name": "ai:in-progress"}]}
+        state = {"issues": {"248": {"nextRetryAt": 0}}, "workers": {}}
+
+        self.assertFalse(
+            runner.issue_is_processable(
+                issue,
+                state,
+                runner.DEFAULT_SKIP_LABELS,
+                now=1000,
+                min_restart_seconds=0,
+            )
+        )
+
+    def test_spawn_worker_clears_stale_push_state_for_new_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = runner.parse_args(["--workspace", tmp])
+            runner.state_dir(args.workspace).mkdir(parents=True)
+            issue = {"number": "248", "title": "retry issue", "labels": [{"name": "ai:in-progress"}]}
+            state = {
+                "issues": {
+                    "248": {
+                        "pushCompletedAt": 100,
+                        "pushLastAttemptAt": 100,
+                        "pushNoopAt": 100,
+                        "nextPushRetryAt": 200,
+                        "pushError": "old push failure",
+                        "pushedRepos": [{"name": "ml-web-zcode", "branch": "old", "headSha": "abc", "commits": ["abc"]}],
+                    }
+                },
+                "workers": {},
+            }
+
+            with (
+                patch.object(runner, "set_issue_labels"),
+                patch.object(runner.subprocess, "Popen") as popen,
+                patch.object(runner.time, "time", return_value=1000),
+            ):
+                popen.return_value.pid = 4242
+
+                runner.spawn_worker(args, issue, "token", "owner/repo", state)
+
+            meta = state["issues"]["248"]
+            for key in [
+                "pushCompletedAt",
+                "pushLastAttemptAt",
+                "pushNoopAt",
+                "nextPushRetryAt",
+                "pushError",
+                "pushedRepos",
+            ]:
+                self.assertNotIn(key, meta)
+
+            self.assertEqual(meta["lastStartedAt"], 1000)
+            self.assertEqual(state["workers"]["248"]["pid"], 4242)
+
     def test_labels_for_inactive_running_success_removes_running_label(self):
         issue = {"number": "221", "labels": [{"name": "处理中"}, {"name": "ai:in-progress"}, {"name": "priority:P1"}]}
         meta = {"lastExitCode": 0, "lastFinishedAt": 200}
@@ -55,6 +114,40 @@ class CnbIssueRunnerTest(unittest.TestCase):
         labels = runner.labels_for_inactive_running_issue(issue, meta)
 
         self.assertEqual(labels, ["需人工确认"])
+
+    def test_labels_for_completed_push_removes_legacy_workflow_labels(self):
+        issue = {
+            "number": "279",
+            "labels": [{"name": "已处理"}, {"name": "待集成"}, {"name": "待验证"}, {"name": "priority:P2"}],
+        }
+        meta = {"pushCompletedAt": 200}
+
+        labels = runner.labels_for_inactive_running_issue(issue, meta)
+
+        self.assertEqual(set(labels or []), {"已处理", "priority:P2"})
+
+    def test_cleanup_legacy_workflow_status_removes_stale_completed_status(self):
+        meta = {"pushCompletedAt": 200, "workflowStatus": "READY_TO_INTEGRATE"}
+
+        self.assertTrue(runner.cleanup_legacy_workflow_status(meta))
+
+        self.assertNotIn("workflowStatus", meta)
+
+    def test_cleanup_legacy_workflow_statuses_cleans_closed_issue_cache(self):
+        state = {
+            "issues": {
+                "275": {"pushCompletedAt": 200, "workflowStatus": "READY_TO_INTEGRATE"},
+                "276": {"workflowStatus": "CLEANED"},
+                "277": {"pushCompletedAt": 201, "workflowStatus": "AWAITING_VERIFY"},
+            }
+        }
+
+        cleaned = runner.cleanup_legacy_workflow_statuses(state)
+
+        self.assertEqual(cleaned, ["275", "277"])
+        self.assertNotIn("workflowStatus", state["issues"]["275"])
+        self.assertEqual(state["issues"]["276"]["workflowStatus"], "CLEANED")
+        self.assertNotIn("workflowStatus", state["issues"]["277"])
 
     def test_default_skip_labels_include_running_and_failed_states(self):
         self.assertIn("已处理", runner.DEFAULT_SKIP_LABELS)
@@ -169,6 +262,7 @@ class CnbIssueRunnerTest(unittest.TestCase):
             repo = root / "ml-svc-zcode"
             run_git(repo, "config", "user.name", "Runner Test")
             run_git(repo, "config", "user.email", "runner@example.invalid")
+            run_git(repo, "checkout", "-b", "ai-v2.0")
             (repo / "README.md").write_text("initial\n", encoding="utf-8")
             run_git(repo, "add", "README.md")
             run_git(repo, "commit", "-m", "chore: initial")
@@ -191,8 +285,31 @@ class CnbIssueRunnerTest(unittest.TestCase):
 
             self.assertEqual(len(pushed), 1)
             self.assertEqual(pushed[0].name, "ml-svc-zcode")
+            self.assertEqual(pushed[0].branch, "ai-v2.0")
             self.assertEqual(pushed[0].commits, [issue_commit])
             self.assertEqual(runner.unpushed_issue_commits(repo, "123"), [])
+
+    def test_push_issue_commits_refuses_ml_svc_zcode_issue_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin = root / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["git", "clone", str(origin), str(root / "ml-svc-zcode")], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            repo = root / "ml-svc-zcode"
+            run_git(repo, "config", "user.name", "Runner Test")
+            run_git(repo, "config", "user.email", "runner@example.invalid")
+            run_git(repo, "checkout", "-b", "ai/issue-279")
+            (repo / "README.md").write_text("initial\n", encoding="utf-8")
+            run_git(repo, "add", "README.md")
+            run_git(repo, "commit", "-m", "chore: initial")
+            run_git(repo, "push", "-u", "origin", "HEAD")
+
+            (repo / "README.md").write_text("initial\nfix\n", encoding="utf-8")
+            run_git(repo, "add", "README.md")
+            run_git(repo, "commit", "-m", "fix: resolve CNB issue #279 修复测试提交")
+
+            with self.assertRaisesRegex(runner.RunnerError, "expected ai-v2.0"):
+                runner.push_issue_commits(root, "279")
 
     def test_push_terminal_issues_pushes_new_commit_after_previous_push(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,6 +320,7 @@ class CnbIssueRunnerTest(unittest.TestCase):
             repo = root / "ml-svc-zcode"
             run_git(repo, "config", "user.name", "Runner Test")
             run_git(repo, "config", "user.email", "runner@example.invalid")
+            run_git(repo, "checkout", "-b", "ai-v2.0")
             (repo / "README.md").write_text("initial\n", encoding="utf-8")
             run_git(repo, "add", "README.md")
             run_git(repo, "commit", "-m", "chore: initial")
