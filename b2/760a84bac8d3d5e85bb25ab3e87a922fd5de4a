@@ -1,0 +1,35 @@
+internal/config/config_test.go
+  s_caba4536ce182b::t_70769f5fd7ca95 28
+docs/superpowers/plans/2026-05-15-issue-integration-closure.md
+  s_caba4536ce182b::t_2228dbef68728a 22,129
+configs/runner.example.yaml
+  s_caba4536ce182b::t_70769f5fd7ca95 15
+internal/runner/runner_test.go
+  s_caba4536ce182b::t_70769f5fd7ca95 414,447,833
+docs/usage.zh-CN.md
+  s_caba4536ce182b::t_70769f5fd7ca95 285
+internal/integration/comments_test.go
+  s_caba4536ce182b::t_70769f5fd7ca95 33,41,57,65
+automation/cnb_issue_runner.py
+  s_caba4536ce182b::t_70769f5fd7ca95 52,942-943
+README.md
+  s_caba4536ce182b::t_70769f5fd7ca95 42
+automation/test_cnb_issue_runner.py
+  s_caba4536ce182b::t_54cdd880b32e64 221-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "b2760a84bac8d3d5e85bb25ab3e87a922fd5de4a",
+  "prompts": {},
+  "sessions": {
+    "s_caba4536ce182b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e9049-8e7a-7270-a70c-a176a2edda85",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Your Name <you@example.com>"
+    }
+  }
+}
