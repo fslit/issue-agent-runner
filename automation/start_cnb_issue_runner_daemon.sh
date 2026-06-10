@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNNER="${WORKSPACE}/automation/cnb_issue_runner.py"
+RUNNER_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKSPACE="${WORKSPACE:-$(cd "${RUNNER_HOME}/.." && pwd)}"
+RUNNER="${RUNNER_HOME}/automation/cnb_issue_runner.py"
 STATE_DIR="${WORKSPACE}/.local_cache/cnb-issue-runner"
 PID_FILE="${STATE_DIR}/daemon.pid"
 LOG_FILE="${STATE_DIR}/daemon.log"
