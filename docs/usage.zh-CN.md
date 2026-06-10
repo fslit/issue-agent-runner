@@ -282,7 +282,7 @@ worker 完成后，runner 会把 issue 分支合并到本地基准分支等待�
 
 ```text
 ml-svc-zcode -> ai-v2.0
-ml-web-zcode -> poc/api-adapter-validation
+ml-web-zcode -> ai-v2.0
 ```
 
 当前验证哪个 issue 以 `current-validation.md` 为准。这样用户只需要验证正常基准分支对应的本地环境，不需要知道或切换 `cnb/issue-*` 分支。

@@ -49,7 +49,7 @@ MALLOC_DEBUG_ENV_KEYS = {
 }
 REQUIRED_PUSH_BRANCHES = {
     "ml-svc-zcode": "ai-v2.0",
-    "ml-web-zcode": "poc/api-adapter-validation",
+    "ml-web-zcode": "ai-v2.0",
 }
 
 
@@ -939,6 +939,8 @@ Body:
 - 所有 CNB 评论、任务回复、阻塞说明和完成说明都必须使用中文；不要使用英文作为主体回复。
 - 先重新拉取 issue 详情确认状态；如果已经有 `已处理` 标签，直接结束。
 - 修改前检查相关仓库 dirty 状态；不要还原用户或其他任务已有改动。
+- 前端源码必须修改 `/Users/m4/Documents/code/zcode/ml-web-zcode`；不要通过修改 `ml-svc-zcode/addons/ml.svc.zcode/public/zcode/web` 或 `public/zcode/web/assets` 下的编译后文件来修前端问题。
+- 后端仓库 `ml-svc-zcode` 只用于 Go/API/数据库等后端修复；涉及 React、页面、组件、样式、运行态 UI、编辑器 UI 的问题应优先在 `ml-web-zcode` 源码中修改。
 - shell 命令使用 `rtk` 前缀。
 - 找到根因后实现最小修复，并运行相关测试/检查。
 - 只有测试通过并且相关代码已经提交后，才把这个 issue 标记为 `已处理` 并评论说明改动和验证命令。

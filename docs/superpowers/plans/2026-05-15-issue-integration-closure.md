@@ -19,7 +19,7 @@ This plan covers:
 - Worker prompt/result contract updates so workers commit on issue branches.
 - Serial merge queue into local baseline branches:
   - `ml-svc-zcode -> ai-v2.0`
-  - `ml-web-zcode -> poc/api-adapter-validation`
+  - `ml-web-zcode -> ai-v2.0`
 - Single pending-human-verification slot on baseline branches.
 - CNB issue comments for merge success, merge conflict, reject/retry, push-on-close, and cleanup.
 - `close -> push baseline branch -> comment -> cleanup local issue branches/worktrees` flow.
@@ -126,7 +126,7 @@ repositories:
   - name: ml-web-zcode
     path: ml-web-zcode
     issueBranchPrefix: cnb
-    baselineBranch: poc/api-adapter-validation
+    baselineBranch: ai-v2.0
 
 integration:
   worktreeRoot: .local_worktrees/issue-agent-runner
