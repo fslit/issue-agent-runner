@@ -1,0 +1,19 @@
+automation/start_cnb_issue_runner_daemon.sh
+  s_caba4536ce182b::t_7c3b95dfccb9f9 4-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "0df79ae0de9f35c5fa338a87a219ef3028b4d31a",
+  "prompts": {},
+  "sessions": {
+    "s_caba4536ce182b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e9049-8e7a-7270-a70c-a176a2edda85",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Your Name <you@example.com>"
+    }
+  }
+}
