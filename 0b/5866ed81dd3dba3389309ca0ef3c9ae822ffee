@@ -1,0 +1,34 @@
+internal/config/config_test.go
+  s_caba4536ce182b::t_fd88e0a9bc11e4 28
+docs/usage.zh-CN.md
+  s_caba4536ce182b::t_fd88e0a9bc11e4 285
+automation/cnb_issue_runner.py
+  s_caba4536ce182b::t_fd88e0a9bc11e4 52
+internal/integration/comments_test.go
+  s_caba4536ce182b::t_fd88e0a9bc11e4 33,41,57,65
+configs/runner.example.yaml
+  s_caba4536ce182b::t_fd88e0a9bc11e4 15
+internal/runner/runner_test.go
+  s_caba4536ce182b::t_f573b6c46535eb 414
+  s_caba4536ce182b::t_fd88e0a9bc11e4 447,833
+README.md
+  s_caba4536ce182b::t_fd88e0a9bc11e4 42
+docs/superpowers/plans/2026-05-15-issue-integration-closure.md
+  s_caba4536ce182b::t_fd88e0a9bc11e4 22,125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "0b5866ed81dd3dba3389309ca0ef3c9ae822ffee",
+  "prompts": {},
+  "sessions": {
+    "s_caba4536ce182b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e9049-8e7a-7270-a70c-a176a2edda85",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Your Name <you@example.com>"
+    }
+  }
+}
