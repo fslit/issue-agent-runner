@@ -38,6 +38,8 @@ class CnbIssueRunnerTest(unittest.TestCase):
 
     def test_default_skip_labels_include_running_aliases(self):
         self.assertTrue(runner.RUNNING_LABEL_ALIASES.issubset(runner.DEFAULT_SKIP_LABELS))
+        self.assertEqual(runner.RUNNING_LABEL, "本地处理中")
+        self.assertIn("处理中", runner.RUNNING_LABEL_ALIASES)
 
     def test_issue_is_processable_skips_in_progress_alias_without_attempts(self):
         issue = {"number": "248", "title": "running alias", "labels": [{"name": "ai:in-progress"}]}
@@ -73,7 +75,7 @@ class CnbIssueRunnerTest(unittest.TestCase):
             }
 
             with (
-                patch.object(runner, "set_issue_labels"),
+                patch.object(runner, "set_issue_labels") as set_issue_labels,
                 patch.object(runner.subprocess, "Popen") as popen,
                 patch.object(runner.time, "time", return_value=1000),
             ):
@@ -81,6 +83,9 @@ class CnbIssueRunnerTest(unittest.TestCase):
 
                 runner.spawn_worker(args, issue, "token", "owner/repo", state)
 
+            set_issue_labels.assert_called_once()
+            self.assertIn("本地处理中", set_issue_labels.call_args.args[3])
+            self.assertNotIn("处理中", set_issue_labels.call_args.args[3])
             meta = state["issues"]["248"]
             for key in [
                 "pushCompletedAt",
