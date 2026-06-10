@@ -25,7 +25,7 @@ repositories:
   - name: ml-web-zcode
     path: ml-web-zcode
     issueBranchPrefix: cnb
-    baselineBranch: ai-v2.0
+    baselineBranch: poc/api-adapter-validation
     directBaseline: true
 provider:
   type: cnb

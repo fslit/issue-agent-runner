@@ -30,7 +30,7 @@ func TestMergeConflictCommentIncludesConflictFiles(t *testing.T) {
 	comment := MergeConflictComment(domain.Issue{Number: "89"}, domain.IssueState{
 		Repositories: map[string]domain.IssueRepoState{
 			"ml-web-zcode": {
-				BaselineBranch: "ai-v2.0",
+				BaselineBranch: "poc/api-adapter-validation",
 				ConflictFiles:  []string{"packages/app.tsx", "packages/index.less"},
 			},
 		},
@@ -38,7 +38,7 @@ func TestMergeConflictCommentIncludesConflictFiles(t *testing.T) {
 
 	require.Contains(t, comment, "问题 #89")
 	require.Contains(t, comment, "Model: `gpt-5.5` (reasoning: `xhigh`)")
-	require.Contains(t, comment, "`ml-web-zcode` -> `ai-v2.0`")
+	require.Contains(t, comment, "`ml-web-zcode` -> `poc/api-adapter-validation`")
 	require.Contains(t, comment, "`packages/app.tsx`")
 	require.Contains(t, comment, "`packages/index.less`")
 }
@@ -54,7 +54,7 @@ func TestClosedPushedCommentIncludesPushedShas(t *testing.T) {
 	comment := ClosedPushedComment(domain.Issue{Number: "92"}, domain.IssueState{
 		Repositories: map[string]domain.IssueRepoState{
 			"ml-web-zcode": {
-				BaselineBranch:    "ai-v2.0",
+				BaselineBranch:    "poc/api-adapter-validation",
 				PushedBaselineSHA: "def456",
 			},
 		},
@@ -62,5 +62,5 @@ func TestClosedPushedCommentIncludesPushedShas(t *testing.T) {
 
 	require.Contains(t, comment, "问题 #92 已关闭")
 	require.Contains(t, comment, "Model: `gpt-5.5` (reasoning: `xhigh`)")
-	require.Contains(t, comment, "`ml-web-zcode` -> `ai-v2.0` (def456)")
+	require.Contains(t, comment, "`ml-web-zcode` -> `poc/api-adapter-validation` (def456)")
 }

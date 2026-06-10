@@ -49,7 +49,7 @@ MALLOC_DEBUG_ENV_KEYS = {
 }
 REQUIRED_PUSH_BRANCHES = {
     "ml-svc-zcode": "ai-v2.0",
-    "ml-web-zcode": "ai-v2.0",
+    "ml-web-zcode": "poc/api-adapter-validation",
 }
 
 

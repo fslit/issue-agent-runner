@@ -411,7 +411,7 @@ func TestOncePushesRollbackWhenSecondRepositoryPushFails(t *testing.T) {
 						Repo:           "ml-web-zcode",
 						RepoPath:       filepath.Join(env.stateDir, "ml-web-zcode"),
 						IssueBranch:    "cnb/issue-7/ml-web-zcode",
-						BaselineBranch: "ai-v2.0",
+						BaselineBranch: "poc/api-adapter-validation",
 						CommitSHA:      "commit-7-web",
 					},
 				},
@@ -444,7 +444,7 @@ func TestOncePushesRollbackWhenSecondRepositoryPushFails(t *testing.T) {
 	}, env.gitOps.reverted)
 	require.Equal(t, []string{
 		"ml-svc-zcode:ai-v2.0",
-		"ml-web-zcode:ai-v2.0",
+		"ml-web-zcode:poc/api-adapter-validation",
 		"ml-svc-zcode:ai-v2.0",
 	}, env.gitOps.pushed)
 }
@@ -830,7 +830,7 @@ func newRunnerTestEnv(t *testing.T) *runnerTestEnv {
 		Project: config.ProjectConfig{Workspace: stateDir, Name: "test"},
 		Repositories: []config.RepositoryConfig{
 			{Name: "ml-svc-zcode", Path: filepath.Join(stateDir, "ml-svc-zcode"), IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"},
-			{Name: "ml-web-zcode", Path: filepath.Join(stateDir, "ml-web-zcode"), IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"},
+			{Name: "ml-web-zcode", Path: filepath.Join(stateDir, "ml-web-zcode"), IssueBranchPrefix: "cnb", BaselineBranch: "poc/api-adapter-validation"},
 		},
 		Executor: config.ExecutorConfig{Model: "gpt-5.5", ReasoningEffort: "xhigh"},
 		Integration: config.IntegrationConfig{
