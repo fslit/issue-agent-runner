@@ -1,0 +1,21 @@
+automation/test_cnb_issue_runner.py
+  s_caba4536ce182b::t_c1b5366f3a0f95 43-57
+automation/cnb_issue_runner.py
+  s_caba4536ce182b::t_e93bba04528025 32,35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "6366efbc2664f1d1d3f11828df246b5cd724705a",
+  "prompts": {},
+  "sessions": {
+    "s_caba4536ce182b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e9049-8e7a-7270-a70c-a176a2edda85",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Your Name <you@example.com>"
+    }
+  }
+}
