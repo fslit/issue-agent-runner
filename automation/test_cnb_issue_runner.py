@@ -40,6 +40,21 @@ class CnbIssueRunnerTest(unittest.TestCase):
         self.assertTrue(runner.RUNNING_LABEL_ALIASES.issubset(runner.DEFAULT_SKIP_LABELS))
         self.assertEqual(runner.RUNNING_LABEL, "本地处理中")
         self.assertIn("处理中", runner.RUNNING_LABEL_ALIASES)
+        self.assertIn("ai:fixed", runner.DEFAULT_SKIP_LABELS)
+
+    def test_issue_is_processable_skips_external_fixed_label(self):
+        issue = {"number": "317", "title": "external fixed", "labels": [{"name": "ai:fixed"}]}
+        state = {"issues": {"317": {"nextRetryAt": 0}}, "workers": {}}
+
+        self.assertFalse(
+            runner.issue_is_processable(
+                issue,
+                state,
+                runner.DEFAULT_SKIP_LABELS,
+                now=1000,
+                min_restart_seconds=0,
+            )
+        )
 
     def test_issue_is_processable_skips_in_progress_alias_without_attempts(self):
         issue = {"number": "248", "title": "running alias", "labels": [{"name": "ai:in-progress"}]}
