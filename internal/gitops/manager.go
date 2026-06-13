@@ -78,6 +78,21 @@ func (m *Manager) PrepareIssueWorktree(ctx context.Context, worktreeRoot string,
 		return domain.TaskRepository{}, fmt.Errorf("stat worktree path: %w", err)
 	}
 
+	existingWorktreePath, found, err := m.worktreePathForBranch(ctx, repo.Path, branch)
+	if err != nil {
+		return domain.TaskRepository{}, err
+	}
+	if found {
+		existingWorktreePath = canonicalPath(existingWorktreePath)
+		return domain.TaskRepository{
+			Name:           repo.Name,
+			Path:           repo.Path,
+			WorktreePath:   existingWorktreePath,
+			IssueBranch:    branch,
+			BaselineBranch: repo.BaselineBranch,
+		}, nil
+	}
+
 	if _, err := m.runCmd(ctx, repo.Path, "worktree", "add", "-B", branch, worktreePath, repo.BaselineBranch); err != nil {
 		return domain.TaskRepository{}, err
 	}
@@ -170,6 +185,38 @@ func (m *Manager) CleanupIssueWorktree(ctx context.Context, repoPath string, wor
 		return err
 	}
 	return nil
+}
+
+func canonicalPath(path string) string {
+	value, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(value)
+}
+
+func (m *Manager) worktreePathForBranch(ctx context.Context, repoPath string, branch string) (string, bool, error) {
+	value, err := m.runCmd(ctx, repoPath, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", false, err
+	}
+	targetRef := "refs/heads/" + branch
+	var currentPath string
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			currentPath = ""
+			continue
+		}
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			currentPath = path
+			continue
+		}
+		if ref, ok := strings.CutPrefix(line, "branch "); ok && ref == targetRef && currentPath != "" {
+			return currentPath, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func samePath(left string, right string) bool {

@@ -346,7 +346,7 @@ attempts >= maxAttempts -> paused=true
 ```yaml
 hooks:
   onIssueClaim:
-    command: ./automation/hooks/on-claim.sh
+    command: ./scripts/hooks/on-claim.sh
     timeoutSeconds: 30
 
   onIssuePaused:
@@ -355,7 +355,7 @@ hooks:
       method: POST
 
   onProgressUpdate:
-    command: ./automation/hooks/progress-extra.sh
+    command: ./scripts/hooks/progress-extra.sh
 ```
 
 外部命令通过 stdin 接收 JSON 事件，通过 stdout 返回 JSON 结果。

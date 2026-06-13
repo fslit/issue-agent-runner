@@ -43,7 +43,7 @@ tmux kill-session -t issue-agent-runner
 如果曾经用 `go run` 启动后残留了孤儿进程，可以检查：
 
 ```bash
-ps -ef | rg -i "issue-agent-runner run|codex exec|automation/cnb_issue_runner.py"
+ps -ef | rg -i "issue-agent-runner run|codex exec"
 ```
 
 同一个 `stateDir` 现在有 daemon 锁保护，重复启动会直接失败：
@@ -255,7 +255,7 @@ webhook payload 使用 camelCase 字段：
 ```yaml
 hooks:
   onIssueIntegrated:
-    command: "rtk ./automation/restart-validation-env.sh"
+    command: "rtk ./scripts/restart-validation-env.sh"
     timeoutSeconds: 180
 ```
 

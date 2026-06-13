@@ -1,4 +1,6 @@
-继续处理 issue。必须只在下面列出的 worktree 路径内处理并提交本地 commit；directBaseline 模式下 worktree 就是目标分支所在仓库路径。
+继续处理 issue。CNB issue 来源仓库只表示本次轮询从哪个项目读取 issue，不表示只能修改这个仓库。你必须根据 issue 标题、正文、截图、报错、代码搜索和项目上下文，自行判断问题属于 `ml-svc-zcode`、`ml-web-zcode`，还是 zcode workspace 下列出的其他相关工程；只修改与本 issue 根因相关的工程。
+
+必须只在下面列出的 worktree 路径内处理并提交本地 commit；directBaseline 模式下 worktree 就是目标分支所在仓库路径。
 
 Repo: {{ .RepoURL }}
 Issue: #{{ .Number }}
@@ -22,7 +24,9 @@ Issue worktrees:
 - 只处理这个 issue，不要顺手处理其他 issue。
 - 所有 CNB 评论、任务回复、阻塞说明和完成说明都必须使用中文；不要使用英文作为主体回复。
 - 先重新拉取 issue 详情确认状态；如果已经有 `已处理` 标签，直接结束。
-- 修改前检查相关仓库 dirty 状态；不要还原用户或其他任务已有改动。
+- 修改前检查相关 worktree dirty 状态；不要还原用户或其他任务已有改动。
+- 根据 issue 内容判断实际需要修改哪些 repo；不需要修改的 repo 只用于阅读和定位，不要提交空 commit。
+- 完成回复和 Result file 的 `summary` / `changedFiles` / `repoResults` 必须清楚说明实际修改了哪些 repo、没有修改哪些列出的 repo，以及判断依据。
 - 只允许在上面列出的 `worktree` 路径内修改代码、运行测试和提交 commit。
 - 每个实际修改过的 repo 都必须保留本地 commit；如果 `branch` 与 `baseline` 相同，说明本次直接提交到目标分支。
 - commit 标题建议格式：`fix(issue-{{ .Number }}): <中文简短问题描述>`，其中问题描述必须使用中文。

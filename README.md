@@ -53,30 +53,6 @@ rtk go run ./cmd/issue-agent-runner once -c configs/runner.example.yaml --dry-ru
 rtk go run ./cmd/issue-agent-runner status -c configs/runner.example.yaml
 ```
 
-## Legacy Python Runner
-
-The legacy Python CNB runner is kept under `automation/` for zcode migration
-and rollback scenarios:
-
-```bash
-rtk python3 -m unittest automation.test_cnb_issue_runner
-rtk python3 automation/cnb_issue_runner.py --workspace /path/to/workspace --dry-run
-rtk ./automation/start_cnb_issue_runner_daemon.sh start
-```
-
-It works directly in the currently checked-out workspace branches and does not
-create per-issue branches or worktrees.
-
-During the zcode migration, `configs/runner.example.yaml` intentionally points at the
-legacy Python runner state directory: `.local_cache/cnb-issue-runner`.
-
-Compare Python and Go dry runs before replacing the daemon:
-
-```bash
-rtk python3 /Users/m4/Documents/code/zcode/automation/cnb_issue_runner.py --workspace /Users/m4/Documents/code/zcode --dry-run
-rtk go run ./cmd/issue-agent-runner once -c configs/runner.example.yaml --dry-run
-```
-
 Runner process events are appended to `paths.runnerLog` as JSONL. Each line is a
 structured event such as `poll_start`, `worker_started`, `merge_conflict`,
 `awaiting_verify`, `pushed`, or `issue_cleaned`.

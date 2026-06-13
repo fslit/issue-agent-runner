@@ -16,7 +16,7 @@ MVP includes:
 
 - `run`, `once`, `status`, `summary`, `pause`, `resume`, `reset-attempts`, `stop-worker`.
 - YAML config loading with defaults and validation.
-- Legacy Python runner state compatibility.
+- Legacy runner state compatibility.
 - CNB provider for list/get/labels/comments.
 - Codex executor with process group handling, log file, prompt file, and result file.
 - Core scheduler with max concurrency, retry backoff, capacity backoff, quota/auth pause, max attempts pause, and stale terminate.
@@ -625,12 +625,6 @@ rtk git commit -m "feat: wire runner CLI commands"
 rtk go test ./...
 rtk go run ./cmd/issue-agent-runner once -c configs/runner.example.yaml --dry-run
 rtk go run ./cmd/issue-agent-runner status -c configs/runner.example.yaml
-```
-
-- [ ] Run Python comparison:
-
-```bash
-rtk python3 /Users/m4/Documents/code/zcode/automation/cnb_issue_runner.py --workspace /Users/m4/Documents/code/zcode --dry-run
 ```
 
 - [ ] Run Go dry run:

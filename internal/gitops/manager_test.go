@@ -34,6 +34,30 @@ func TestPrepareIssueWorktreeCreatesBranchAndPath(t *testing.T) {
 	require.Equal(t, worktree.IssueBranch, current)
 }
 
+func TestPrepareIssueWorktreeReusesExistingBranchWorktree(t *testing.T) {
+	repoPath := createTestRepoWithBaseline(t, "poc/api-adapter-validation")
+	manager := New()
+	repo := config.RepositoryConfig{
+		Name:              "ml-web-zcode",
+		Path:              repoPath,
+		IssueBranchPrefix: "cnb",
+		BaselineBranch:    "poc/api-adapter-validation",
+	}
+
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	existing, err := manager.PrepareIssueWorktree(context.Background(), oldRoot, "37", repo)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.CleanupIssueWorktree(context.Background(), repoPath, existing.WorktreePath, existing.IssueBranch))
+	})
+
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	reused, err := manager.PrepareIssueWorktree(context.Background(), newRoot, "37", repo)
+	require.NoError(t, err)
+	require.Equal(t, canonicalPath(existing.WorktreePath), reused.WorktreePath)
+	require.Equal(t, existing.IssueBranch, reused.IssueBranch)
+}
+
 func TestPrepareIssueWorktreeDirectBaselineUsesRepositoryPath(t *testing.T) {
 	repoPath := createTestRepo(t)
 	manager := New()
@@ -232,6 +256,10 @@ func TestCleanupIssueWorktreeRemovesWorktreeAndBranch(t *testing.T) {
 }
 
 func createTestRepo(t *testing.T) string {
+	return createTestRepoWithBaseline(t, "ai-v2.0")
+}
+
+func createTestRepoWithBaseline(t *testing.T, baselineBranch string) string {
 	t.Helper()
 
 	root := t.TempDir()
@@ -252,9 +280,9 @@ func createTestRepo(t *testing.T) string {
 	require.NoError(t, err)
 	_, err = runGit(context.Background(), repoPath, "commit", "-m", "chore: initial commit")
 	require.NoError(t, err)
-	_, err = runGit(context.Background(), repoPath, "branch", "-M", "ai-v2.0")
+	_, err = runGit(context.Background(), repoPath, "branch", "-M", baselineBranch)
 	require.NoError(t, err)
-	_, err = runGit(context.Background(), repoPath, "push", "-u", "origin", "ai-v2.0")
+	_, err = runGit(context.Background(), repoPath, "push", "-u", "origin", baselineBranch)
 	require.NoError(t, err)
 
 	return repoPath
