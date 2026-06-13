@@ -57,7 +57,30 @@ func TestOnceRemovesLegacyFailedLabelWhenClaimingCandidate(t *testing.T) {
 	err := env.runner.Once(context.Background())
 	require.NoError(t, err)
 
-	require.Equal(t, []labelCall{{number: "7", labels: []string{"ai:failed"}}}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{
+		{number: "7", labels: []string{"ai:failed"}},
+		workflowCleanupLabelCall("7"),
+	}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{{number: "7", labels: []string{"处理中"}}}, env.provider.addedLabels)
+}
+
+func TestOnceClaimsCandidateWithSingleWorkflowLabel(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	env.provider.issues = []domain.Issue{{
+		Number: "7",
+		Title:  "stale labels",
+		State:  "open",
+		Labels: []string{"待集成", "待验证", "本地处理中", "priority:P2"},
+	}}
+	env.executor.startWorker = domain.WorkerState{IssueNumber: "7", PID: 7007, Title: "stale labels", StartedAt: env.now.Unix()}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	require.Equal(t, []labelCall{
+		{number: "7", labels: []string{"本地处理中", "待集成", "待验证"}},
+		workflowCleanupLabelCall("7"),
+	}, env.provider.removedLabels)
 	require.Equal(t, []labelCall{{number: "7", labels: []string{"处理中"}}}, env.provider.addedLabels)
 }
 
@@ -239,6 +262,78 @@ func TestOnceRecordsFinishedWorkerFailureAndClearsRunningStatus(t *testing.T) {
 	require.Equal(t, "7", failed["issue"])
 	require.Equal(t, "UNKNOWN", failed["errorKind"])
 	require.EqualValues(t, 2, failed["exitCode"])
+}
+
+func TestOnceClearsWorkflowLabelsWhenWorkerFailureWillRetry(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	exitCode := 1
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{
+			"7": {IssueNumber: "7", PID: 7007, Title: "retry later", StartedAt: env.now.Add(-time.Minute).Unix()},
+		},
+		Issues: map[string]domain.IssueState{
+			"7": {WorkflowStatus: domain.IssueWorkflowStatusRunning},
+		},
+	}))
+	env.provider.issues = []domain.Issue{{
+		Number: "7",
+		Title:  "retry later",
+		State:  "open",
+		Labels: []string{"处理中", "待集成", "本地处理中"},
+	}}
+	env.executor.results = map[string]domain.WorkerResult{
+		"7": {
+			ExitCode:     &exitCode,
+			ErrorMessage: "temporary test failure",
+		},
+	}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	require.False(t, loaded.Issues["7"].Paused)
+	require.Equal(t, domain.IssueWorkflowStatusUnknown, loaded.Issues["7"].WorkflowStatus)
+	require.Equal(t, []labelCall{workflowCleanupLabelCall("7")}, env.provider.removedLabels)
+	require.Empty(t, env.provider.addedLabels)
+}
+
+func TestOnceMarksNeedsHumanWhenWorkerFailurePausesIssue(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	exitCode := 1
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{
+			"7": {IssueNumber: "7", PID: 7007, Title: "failed too often", StartedAt: env.now.Add(-time.Minute).Unix()},
+		},
+		Issues: map[string]domain.IssueState{
+			"7": {WorkflowStatus: domain.IssueWorkflowStatusRunning, Attempts: 2},
+		},
+	}))
+	env.provider.issues = []domain.Issue{{
+		Number: "7",
+		Title:  "failed too often",
+		State:  "open",
+		Labels: []string{"处理中", "待集成"},
+	}}
+	env.executor.results = map[string]domain.WorkerResult{
+		"7": {
+			ExitCode:     &exitCode,
+			ErrorMessage: "still failing",
+		},
+	}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	require.True(t, loaded.Issues["7"].Paused)
+	require.Equal(t, "failed 3 attempts", loaded.Issues["7"].PauseReason)
+	require.Equal(t, []labelCall{workflowCleanupLabelCall("7")}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{{number: "7", labels: []string{"需人工确认"}}}, env.provider.addedLabels)
 }
 
 func TestOnceRunsPausedHookWhenWorkerFailurePausesIssue(t *testing.T) {
@@ -591,6 +686,8 @@ func TestOnceSyncsExistingWorkflowLabels(t *testing.T) {
 	env.provider.issues = []domain.Issue{
 		{Number: "7", Title: "ready issue", State: "open", Labels: []string{"已处理", "ai:fixed", "ai:queued", "ai:in-progress", "priority:P2"}},
 		{Number: "8", Title: "verify issue", State: "open", Labels: []string{"处理中", "已处理", "待集成"}},
+		{Number: "9", Title: "stale remote labels", State: "open", Labels: []string{"处理中", "待集成", "本地处理中", "priority:P1"}},
+		{Number: "10", Title: "needs human", State: "open", Labels: []string{"需人工确认"}},
 	}
 
 	err := env.runner.Once(context.Background())
@@ -599,6 +696,7 @@ func TestOnceSyncsExistingWorkflowLabels(t *testing.T) {
 	require.Equal(t, []labelCall{
 		{number: "7", labels: []string{"已处理", "ai:fixed", "ai:queued", "ai:in-progress"}},
 		{number: "8", labels: []string{"处理中", "已处理", "待集成"}},
+		{number: "9", labels: []string{"处理中", "本地处理中", "待集成"}},
 	}, env.provider.removedLabels)
 	require.Equal(t, []labelCall{
 		{number: "7", labels: []string{"待集成"}},
@@ -928,7 +1026,7 @@ type labelCall struct {
 }
 
 func workflowCleanupLabelCall(number string) labelCall {
-	return labelCall{number: number, labels: []string{"处理中", "已处理", "ai:fixed", "ai:queued", "ai:in-progress", "待集成", "待验证"}}
+	return labelCall{number: number, labels: []string{"处理中", "已处理", "处理失败", "需人工确认", "ai:failed", "ai:fixed", "ai:queued", "ai:in-progress", "本地处理中", "待集成", "待验证"}}
 }
 
 type fakeProvider struct {

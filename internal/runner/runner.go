@@ -31,6 +31,7 @@ const (
 	legacyDoneLabel       = "ai:fixed"
 	legacyQueuedLabel     = "ai:queued"
 	legacyRunningLabel    = "ai:in-progress"
+	legacyLocalRunning    = "本地处理中"
 	readyToIntegrateLabel = "待集成"
 	awaitingVerifyLabel   = "待验证"
 )
@@ -193,6 +194,7 @@ func (r *Runner) pruneWorkers(ctx context.Context, st *domain.State, now time.Ti
 					ErrorKind:    domain.ErrorTimeout,
 					ErrorMessage: "worker hard timeout; terminated for retry",
 				}, now, r.cfg.Runner, st)
+				r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
 				r.logWorkerFailed(number, st.Issues[number])
 				r.runPausedHookIfNeeded(ctx, number, st.Issues[number])
 				delete(st.Workers, number)
@@ -207,6 +209,7 @@ func (r *Runner) pruneWorkers(ctx context.Context, st *domain.State, now time.Ti
 					ErrorKind:    domain.ErrorStale,
 					ErrorMessage: "worker log stale; terminated for retry",
 				}, now, r.cfg.Runner, st)
+				r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
 				r.logWorkerFailed(number, st.Issues[number])
 				r.runPausedHookIfNeeded(ctx, number, st.Issues[number])
 				delete(st.Workers, number)
@@ -222,6 +225,7 @@ func (r *Runner) pruneWorkers(ctx context.Context, st *domain.State, now time.Ti
 			}
 		} else {
 			ApplyFailure(number, worker, result, now, r.cfg.Runner, st)
+			r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
 			r.logWorkerFailed(number, st.Issues[number])
 			r.runPausedHookIfNeeded(ctx, number, st.Issues[number])
 		}
@@ -261,21 +265,17 @@ func (r *Runner) claimAndStart(ctx context.Context, issue domain.Issue, st *doma
 	if r.dryRun {
 		return nil
 	}
-	if labelsToRemove := legacyClaimLabels(issue.Labels); len(labelsToRemove) > 0 {
-		if err := r.provider.RemoveLabels(ctx, issue.Number, labelsToRemove); err != nil {
-			return err
-		}
-	}
-	if err := r.provider.AddLabels(ctx, issue.Number, []string{r.cfg.Labels.Running}); err != nil {
-		return err
-	}
 
 	taskRepos, err := r.prepareTaskRepositories(ctx, issue.Number)
 	if err != nil {
 		return err
 	}
+	if err := r.syncWorkflowLabels(ctx, issue.Number, domain.IssueWorkflowStatusRunning); err != nil {
+		return err
+	}
 	task, err := r.buildTask(issue, taskRepos)
 	if err != nil {
+		r.syncWorkflowLabelsBestEffort(ctx, issue.Number, domain.IssueWorkflowStatusUnknown)
 		return err
 	}
 	worker, err := r.executor.Start(ctx, task)
@@ -283,6 +283,7 @@ func (r *Runner) claimAndStart(ctx context.Context, issue domain.Issue, st *doma
 		ApplyFailure(issue.Number, domain.WorkerState{IssueNumber: issue.Number, Title: issue.Title}, domain.WorkerResult{
 			ErrorMessage: err.Error(),
 		}, now, r.cfg.Runner, st)
+		r.syncFailureWorkflowLabels(ctx, issue.Number, st.Issues[issue.Number])
 		r.logEvent("worker_start_failed", map[string]any{"issue": issue.Number, "error": err.Error()})
 		return nil
 	}
@@ -308,15 +309,6 @@ func (r *Runner) claimAndStart(ctx context.Context, issue domain.Issue, st *doma
 	st.Issues[issue.Number] = meta
 	r.logEvent("worker_started", map[string]any{"issue": issue.Number, "pid": worker.PID, "repos": len(taskRepos)})
 	r.runHook(ctx, "onIssueClaim", r.cfg.Hooks.OnIssueClaim, issue, meta)
-	return nil
-}
-
-func legacyClaimLabels(labels []string) []string {
-	for _, label := range labels {
-		if label == legacyFailedLabel {
-			return []string{legacyFailedLabel}
-		}
-	}
 	return nil
 }
 
@@ -441,11 +433,8 @@ func (r *Runner) processIntegrationQueue(ctx context.Context, issues []domain.Is
 				meta.PauseReason = err.Error()
 				st.Issues[number] = meta
 				r.logEvent("merge_conflict", map[string]any{"issue": number, "repo": repoName, "files": append([]string(nil), conflictErr.Files...)})
-				if removeErr := r.provider.RemoveLabels(ctx, number, workflowStateLabels(r.cfg.Labels)); removeErr != nil {
-					return removeErr
-				}
-				if addErr := r.provider.AddLabels(ctx, number, []string{r.cfg.Labels.NeedsHuman}); addErr != nil {
-					return addErr
+				if err := r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusMergeConflict); err != nil {
+					return err
 				}
 				if commentErr := r.provider.AddComment(ctx, number, integration.MergeConflictComment(issue, meta, r.agentInfo(meta))); commentErr != nil {
 					return commentErr
@@ -738,11 +727,25 @@ func (r *Runner) syncWorkflowLabels(ctx context.Context, number string, status d
 		return err
 	}
 
-	label := workflowStatusLabel(status)
+	label := workflowStatusLabel(r.cfg.Labels, status)
 	if label == "" {
 		return nil
 	}
 	return r.provider.AddLabels(ctx, number, []string{label})
+}
+
+func (r *Runner) syncWorkflowLabelsBestEffort(ctx context.Context, number string, status domain.IssueWorkflowStatus) {
+	if err := r.syncWorkflowLabels(ctx, number, status); err != nil {
+		r.logEvent("workflow_label_sync_failed", map[string]any{"issue": number, "status": status, "error": err.Error()})
+	}
+}
+
+func (r *Runner) syncFailureWorkflowLabels(ctx context.Context, number string, meta domain.IssueState) {
+	status := domain.IssueWorkflowStatusUnknown
+	if meta.Paused {
+		status = domain.IssueWorkflowStatusMergeConflict
+	}
+	r.syncWorkflowLabelsBestEffort(ctx, number, status)
 }
 
 func (r *Runner) syncKnownWorkflowLabels(ctx context.Context, issues []domain.Issue, st domain.State, handled map[string]bool) error {
@@ -759,14 +762,14 @@ func (r *Runner) syncKnownWorkflowLabels(ctx context.Context, issues []domain.Is
 }
 
 func (r *Runner) syncKnownIssueWorkflowLabels(ctx context.Context, issue domain.Issue, status domain.IssueWorkflowStatus) error {
-	desired := workflowStatusLabel(status)
-	if desired == "" {
-		return nil
-	}
-
+	desired := workflowStatusLabel(r.cfg.Labels, status)
 	current := labelSet(issue.Labels)
 	remove := make([]string, 0)
-	for _, label := range workflowStateLabels(r.cfg.Labels) {
+	cleanupLabels := workflowStateLabels(r.cfg.Labels)
+	if desired == "" {
+		cleanupLabels = staleWorkflowStateLabels(r.cfg.Labels)
+	}
+	for _, label := range cleanupLabels {
 		if label != desired && current[label] {
 			remove = append(remove, label)
 		}
@@ -776,33 +779,71 @@ func (r *Runner) syncKnownIssueWorkflowLabels(ctx context.Context, issue domain.
 			return err
 		}
 	}
+	if desired == "" {
+		return nil
+	}
 	if !current[desired] {
 		return r.provider.AddLabels(ctx, issue.Number, []string{desired})
 	}
 	return nil
 }
 
-func workflowStatusLabel(status domain.IssueWorkflowStatus) string {
+func workflowStatusLabel(labels config.LabelConfig, status domain.IssueWorkflowStatus) string {
 	switch status {
+	case domain.IssueWorkflowStatusRunning:
+		return labels.Running
 	case domain.IssueWorkflowStatusReadyToIntegrate:
 		return readyToIntegrateLabel
 	case domain.IssueWorkflowStatusAwaitingVerify:
 		return awaitingVerifyLabel
+	case domain.IssueWorkflowStatusMergeConflict:
+		return labels.NeedsHuman
 	default:
 		return ""
 	}
 }
 
 func workflowStateLabels(labels config.LabelConfig) []string {
-	return []string{
+	return compactLabels([]string{
 		labels.Running,
 		labels.Done,
+		labels.Failed,
+		labels.NeedsHuman,
+		legacyFailedLabel,
 		legacyDoneLabel,
 		legacyQueuedLabel,
 		legacyRunningLabel,
+		legacyLocalRunning,
 		readyToIntegrateLabel,
 		awaitingVerifyLabel,
+	})
+}
+
+func staleWorkflowStateLabels(labels config.LabelConfig) []string {
+	return compactLabels([]string{
+		labels.Running,
+		legacyFailedLabel,
+		legacyDoneLabel,
+		legacyQueuedLabel,
+		legacyRunningLabel,
+		legacyLocalRunning,
+		readyToIntegrateLabel,
+		awaitingVerifyLabel,
+	})
+}
+
+func compactLabels(labels []string) []string {
+	values := make([]string, 0, len(labels))
+	seen := map[string]bool{}
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" || seen[label] {
+			continue
+		}
+		values = append(values, label)
+		seen[label] = true
 	}
+	return values
 }
 
 func (r *Runner) cleanupIssue(ctx context.Context, number string, st *domain.State, now time.Time) error {
@@ -854,9 +895,7 @@ func (r *Runner) applySuccess(ctx context.Context, number string, worker domain.
 		fields["exit_code"] = *result.ExitCode
 	}
 	r.logEvent("worker_succeeded", fields)
-	if err := r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusReadyToIntegrate); err != nil {
-		r.logEvent("workflow_label_sync_failed", map[string]any{"issue": number, "status": domain.IssueWorkflowStatusReadyToIntegrate, "error": err.Error()})
-	}
+	r.syncWorkflowLabelsBestEffort(ctx, number, domain.IssueWorkflowStatusReadyToIntegrate)
 	return nil
 }
 
