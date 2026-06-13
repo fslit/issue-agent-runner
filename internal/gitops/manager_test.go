@@ -127,6 +127,7 @@ func TestMergeIssueBranchReturnsMergeCommit(t *testing.T) {
 	repoPath := createTestRepo(t)
 	manager := New()
 	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	cleanupIntegrationWorktree(t, repoPath, repo.BaselineBranch)
 	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -143,15 +144,51 @@ func TestMergeIssueBranchReturnsMergeCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, result.MergeCommit)
 
-	head, err := runGit(context.Background(), repoPath, "rev-parse", "HEAD")
+	head, err := runGit(context.Background(), integrationWorktreePath(repoPath, repo.BaselineBranch), "rev-parse", "HEAD")
 	require.NoError(t, err)
 	require.Equal(t, result.MergeCommit, head)
+}
+
+func TestMergeIssueBranchDoesNotCheckoutBaselineInRepositoryWorktree(t *testing.T) {
+	repoPath := createTestRepoWithBaseline(t, "poc/api-adapter-validation")
+	manager := New()
+	repo := config.RepositoryConfig{Name: "ml-web-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "poc/api-adapter-validation"}
+	cleanupIntegrationWorktree(t, repoPath, repo.BaselineBranch)
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "37", repo)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.CleanupIssueWorktree(context.Background(), repoPath, worktree.WorktreePath, worktree.IssueBranch))
+	})
+
+	writeFile(t, filepath.Join(worktree.WorktreePath, "feature.txt"), "issue 37\n")
+	_, err = runGit(context.Background(), worktree.WorktreePath, "add", "feature.txt")
+	require.NoError(t, err)
+	_, err = runGit(context.Background(), worktree.WorktreePath, "commit", "-m", "fix(issue-37): add feature")
+	require.NoError(t, err)
+
+	_, err = runGit(context.Background(), repoPath, "checkout", "-b", "local-user-work")
+	require.NoError(t, err)
+	baselineWorktree := filepath.Join(t.TempDir(), "baseline-occupied")
+	_, err = runGit(context.Background(), repoPath, "worktree", "add", baselineWorktree, repo.BaselineBranch)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = runGit(context.Background(), repoPath, "worktree", "remove", "--force", baselineWorktree)
+	})
+
+	result, err := manager.MergeIssueBranch(context.Background(), repoPath, repo.BaselineBranch, worktree.IssueBranch, "no-ff")
+	require.NoError(t, err)
+	require.NotEmpty(t, result.MergeCommit)
+
+	current, err := runGit(context.Background(), repoPath, "branch", "--show-current")
+	require.NoError(t, err)
+	require.Equal(t, "local-user-work", current)
 }
 
 func TestMergeIssueBranchReturnsConflictFilesAndAborts(t *testing.T) {
 	repoPath := createTestRepo(t)
 	manager := New()
 	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	cleanupIntegrationWorktree(t, repoPath, repo.BaselineBranch)
 	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -171,6 +208,8 @@ func TestMergeIssueBranchReturnsConflictFilesAndAborts(t *testing.T) {
 	require.NoError(t, err)
 	_, err = runGit(context.Background(), repoPath, "commit", "-m", "chore: baseline side")
 	require.NoError(t, err)
+	_, err = runGit(context.Background(), repoPath, "push", "origin", repo.BaselineBranch)
+	require.NoError(t, err)
 
 	_, err = manager.MergeIssueBranch(context.Background(), repoPath, repo.BaselineBranch, worktree.IssueBranch, "no-ff")
 	require.Error(t, err)
@@ -179,7 +218,7 @@ func TestMergeIssueBranchReturnsConflictFilesAndAborts(t *testing.T) {
 	require.ErrorAs(t, err, &conflictErr)
 	require.Contains(t, conflictErr.Files, "shared.txt")
 
-	status, statusErr := runGit(context.Background(), repoPath, "status", "--short")
+	status, statusErr := runGit(context.Background(), integrationWorktreePath(repoPath, repo.BaselineBranch), "status", "--short")
 	require.NoError(t, statusErr)
 	require.Empty(t, status)
 }
@@ -188,6 +227,7 @@ func TestRevertMergeCommitRestoresBaseline(t *testing.T) {
 	repoPath := createTestRepo(t)
 	manager := New()
 	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	cleanupIntegrationWorktree(t, repoPath, repo.BaselineBranch)
 	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -207,7 +247,7 @@ func TestRevertMergeCommitRestoresBaseline(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, revertCommit)
 
-	_, err = os.Stat(filepath.Join(repoPath, "feature.txt"))
+	_, err = os.Stat(filepath.Join(integrationWorktreePath(repoPath, repo.BaselineBranch), "feature.txt"))
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
@@ -215,6 +255,7 @@ func TestPushBaselineBranchUpdatesOrigin(t *testing.T) {
 	repoPath := createTestRepo(t)
 	manager := New()
 	repo := config.RepositoryConfig{Name: "ml-svc-zcode", Path: repoPath, IssueBranchPrefix: "cnb", BaselineBranch: "ai-v2.0"}
+	cleanupIntegrationWorktree(t, repoPath, repo.BaselineBranch)
 	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -314,4 +355,12 @@ func createDirectTestRepo(t *testing.T) string {
 func writeFile(t *testing.T, path string, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
+func cleanupIntegrationWorktree(t *testing.T, repoPath string, baselineBranch string) {
+	t.Helper()
+	t.Cleanup(func() {
+		_, _ = runGit(context.Background(), repoPath, "worktree", "remove", "--force", integrationWorktreePath(repoPath, baselineBranch))
+		_, _ = runGit(context.Background(), repoPath, "branch", "-D", integrationBranchName(baselineBranch))
+	})
 }

@@ -109,26 +109,27 @@ func (m *Manager) MergeIssueBranch(ctx context.Context, repoPath string, baselin
 	if mergeMode == "" {
 		mergeMode = "no-ff"
 	}
-	if _, err := m.runCmd(ctx, repoPath, "checkout", baselineBranch); err != nil {
-		return MergeResult{}, err
-	}
 	if issueBranch == baselineBranch {
-		head, err := m.revParse(ctx, repoPath, "HEAD")
+		head, err := m.revParse(ctx, repoPath, issueBranch)
 		if err != nil {
 			return MergeResult{}, err
 		}
 		return MergeResult{MergeCommit: head}, nil
 	}
 
+	integrationPath, err := m.prepareIntegrationWorktree(ctx, repoPath, baselineBranch)
+	if err != nil {
+		return MergeResult{}, err
+	}
 	mergeArgs := []string{"merge", "--no-edit"}
 	if mergeMode == "no-ff" {
 		mergeArgs = append(mergeArgs, "--no-ff")
 	}
 	mergeArgs = append(mergeArgs, issueBranch)
-	if _, err := m.runCmd(ctx, repoPath, mergeArgs...); err != nil {
-		files, filesErr := m.conflictFiles(ctx, repoPath)
+	if _, err := m.runCmd(ctx, integrationPath, mergeArgs...); err != nil {
+		files, filesErr := m.conflictFiles(ctx, integrationPath)
 		if filesErr == nil && len(files) > 0 {
-			_, _ = m.runCmd(ctx, repoPath, "merge", "--abort")
+			_, _ = m.runCmd(ctx, integrationPath, "merge", "--abort")
 			return MergeResult{ConflictFiles: files}, &MergeConflictError{
 				RepoPath:       repoPath,
 				BaselineBranch: baselineBranch,
@@ -139,7 +140,7 @@ func (m *Manager) MergeIssueBranch(ctx context.Context, repoPath string, baselin
 		return MergeResult{}, err
 	}
 
-	head, err := m.revParse(ctx, repoPath, "HEAD")
+	head, err := m.revParse(ctx, integrationPath, "HEAD")
 	if err != nil {
 		return MergeResult{}, err
 	}
@@ -147,20 +148,42 @@ func (m *Manager) MergeIssueBranch(ctx context.Context, repoPath string, baselin
 }
 
 func (m *Manager) RevertMergeCommit(ctx context.Context, repoPath string, baselineBranch string, mergeCommit string) (string, error) {
-	if _, err := m.runCmd(ctx, repoPath, "checkout", baselineBranch); err != nil {
+	integrationPath, found, err := m.existingIntegrationWorktree(ctx, repoPath, baselineBranch)
+	if err != nil {
 		return "", err
 	}
-	if _, err := m.runCmd(ctx, repoPath, "revert", "-m", "1", "--no-edit", mergeCommit); err != nil {
+	if !found {
+		integrationPath, err = m.prepareIntegrationWorktree(ctx, repoPath, baselineBranch)
+		if err != nil {
+			return "", err
+		}
+	}
+	if _, err := m.runCmd(ctx, integrationPath, "merge-base", "--is-ancestor", mergeCommit, "HEAD"); err != nil {
+		if resetErr := m.resetIntegrationWorktree(ctx, repoPath, integrationPath, baselineBranch); resetErr != nil {
+			return "", resetErr
+		}
+		if _, ancestorErr := m.runCmd(ctx, integrationPath, "merge-base", "--is-ancestor", mergeCommit, "HEAD"); ancestorErr != nil {
+			return "", ancestorErr
+		}
+	}
+	if _, err := m.runCmd(ctx, integrationPath, "revert", "-m", "1", "--no-edit", mergeCommit); err != nil {
 		return "", err
 	}
-	return m.revParse(ctx, repoPath, "HEAD")
+	return m.revParse(ctx, integrationPath, "HEAD")
 }
 
 func (m *Manager) PushBaselineBranch(ctx context.Context, repoPath string, baselineBranch string) (string, error) {
-	if _, err := m.runCmd(ctx, repoPath, "push", "origin", baselineBranch); err != nil {
+	pushPath, found, err := m.existingIntegrationWorktree(ctx, repoPath, baselineBranch)
+	if err != nil {
 		return "", err
 	}
-	return m.revParse(ctx, repoPath, "HEAD")
+	if !found {
+		pushPath = repoPath
+	}
+	if _, err := m.runCmd(ctx, pushPath, "push", "origin", "HEAD:refs/heads/"+baselineBranch); err != nil {
+		return "", err
+	}
+	return m.revParse(ctx, pushPath, "HEAD")
 }
 
 func (m *Manager) CleanupIssueWorktree(ctx context.Context, repoPath string, worktreePath string, issueBranch string) error {
@@ -226,6 +249,87 @@ func samePath(left string, right string) bool {
 		return filepath.Clean(left) == filepath.Clean(right)
 	}
 	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+}
+
+func (m *Manager) prepareIntegrationWorktree(ctx context.Context, repoPath string, baselineBranch string) (string, error) {
+	integrationPath, found, err := m.existingIntegrationWorktree(ctx, repoPath, baselineBranch)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		integrationPath = integrationWorktreePath(repoPath, baselineBranch)
+		if err := os.MkdirAll(filepath.Dir(integrationPath), 0o755); err != nil {
+			return "", fmt.Errorf("create integration worktree parent: %w", err)
+		}
+		baseRef := baselineBranch
+		if err := m.fetchBaseline(ctx, repoPath, baselineBranch); err == nil {
+			baseRef = "refs/remotes/origin/" + baselineBranch
+		}
+		if _, err := m.runCmd(ctx, repoPath, "worktree", "add", "-B", integrationBranchName(baselineBranch), integrationPath, baseRef); err != nil {
+			return "", err
+		}
+	}
+	if err := m.resetIntegrationWorktree(ctx, repoPath, integrationPath, baselineBranch); err != nil {
+		return "", err
+	}
+	return integrationPath, nil
+}
+
+func (m *Manager) resetIntegrationWorktree(ctx context.Context, repoPath string, integrationPath string, baselineBranch string) error {
+	baseRef := baselineBranch
+	if err := m.fetchBaseline(ctx, repoPath, baselineBranch); err == nil {
+		baseRef = "refs/remotes/origin/" + baselineBranch
+	}
+	if _, err := m.runCmd(ctx, integrationPath, "checkout", integrationBranchName(baselineBranch)); err != nil {
+		return err
+	}
+	if _, err := m.runCmd(ctx, integrationPath, "reset", "--hard", baseRef); err != nil {
+		return err
+	}
+	if _, err := m.runCmd(ctx, integrationPath, "clean", "-fd"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) existingIntegrationWorktree(ctx context.Context, repoPath string, baselineBranch string) (string, bool, error) {
+	if existingPath, found, err := m.worktreePathForBranch(ctx, repoPath, integrationBranchName(baselineBranch)); err != nil {
+		return "", false, err
+	} else if found {
+		return canonicalPath(existingPath), true, nil
+	}
+	integrationPath := integrationWorktreePath(repoPath, baselineBranch)
+	if _, err := os.Stat(integrationPath); err == nil {
+		if _, err := m.runCmd(ctx, integrationPath, "rev-parse", "--is-inside-work-tree"); err != nil {
+			return "", false, err
+		}
+		return canonicalPath(integrationPath), true, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	return "", false, nil
+}
+
+func (m *Manager) fetchBaseline(ctx context.Context, repoPath string, baselineBranch string) error {
+	_, err := m.runCmd(ctx, repoPath, "fetch", "origin", baselineBranch+":refs/remotes/origin/"+baselineBranch)
+	return err
+}
+
+func integrationWorktreePath(repoPath string, baselineBranch string) string {
+	return filepath.Join(repoPath, ".worktrees", "issue-agent-runner", safeBranchPath(baselineBranch))
+}
+
+func integrationBranchName(baselineBranch string) string {
+	return "issue-agent-runner/integration/" + safeBranchPath(baselineBranch)
+}
+
+func safeBranchPath(branch string) string {
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-")
+	value := strings.Trim(replacer.Replace(branch), "-.")
+	if value == "" {
+		return "baseline"
+	}
+	return value
 }
 
 func (m *Manager) revParse(ctx context.Context, repoPath string, ref string) (string, error) {

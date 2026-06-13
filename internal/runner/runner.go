@@ -118,6 +118,9 @@ func (r *Runner) Once(ctx context.Context) error {
 		if err := r.pruneWorkers(ctx, st, now, handled); err != nil {
 			return err
 		}
+		if err := r.store.Save(st); err != nil {
+			return err
+		}
 		if err := r.ensureAwaitingVerifyPushed(ctx, st); err != nil {
 			return err
 		}
@@ -851,7 +854,10 @@ func (r *Runner) applySuccess(ctx context.Context, number string, worker domain.
 		fields["exit_code"] = *result.ExitCode
 	}
 	r.logEvent("worker_succeeded", fields)
-	return r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusReadyToIntegrate)
+	if err := r.syncWorkflowLabels(ctx, number, domain.IssueWorkflowStatusReadyToIntegrate); err != nil {
+		r.logEvent("workflow_label_sync_failed", map[string]any{"issue": number, "status": domain.IssueWorkflowStatusReadyToIntegrate, "error": err.Error()})
+	}
+	return nil
 }
 
 func (r *Runner) workerIsStale(worker domain.WorkerState, now time.Time) bool {

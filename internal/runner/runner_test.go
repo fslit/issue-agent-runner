@@ -155,6 +155,52 @@ func TestOnceRecordsFinishedWorkerSuccess(t *testing.T) {
 	require.Contains(t, env.provider.comments[0], "Model: `gpt-5.5` (reasoning: `xhigh`)")
 }
 
+func TestOncePersistsFinishedWorkerSuccessWhenIntegrationFails(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	zero := 0
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{
+			"7": {IssueNumber: "7", PID: 7007, Title: "done", StartedAt: env.now.Add(-time.Minute).Unix()},
+		},
+		Issues: map[string]domain.IssueState{
+			"7": {WorkflowStatus: domain.IssueWorkflowStatusRunning},
+		},
+	}))
+	env.provider.issues = []domain.Issue{{Number: "7", Title: "done", State: "open", Labels: []string{"处理中"}}}
+	env.executor.results = map[string]domain.WorkerResult{
+		"7": {
+			ExitCode:     &zero,
+			Status:       "success",
+			Summary:      "fixed",
+			Verification: []string{"rtk go test ./..."},
+			RepoResults: []domain.RepoWorkerResult{
+				{
+					Repo:           "ml-svc-zcode",
+					RepoPath:       filepath.Join(env.stateDir, "ml-svc-zcode"),
+					WorktreePath:   filepath.Join(env.stateDir, ".local_worktrees", "issue-7", "ml-svc-zcode"),
+					IssueBranch:    "cnb/issue-7/ml-svc-zcode",
+					BaselineBranch: "ai-v2.0",
+					HeadSHA:        "head-7",
+					CommitSHA:      "commit-7",
+				},
+			},
+		},
+	}
+	env.gitOps.mergeErrs = map[string]error{"ml-svc-zcode": errors.New("baseline branch checked out elsewhere")}
+
+	err := env.runner.Once(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "checked out elsewhere")
+
+	loaded, loadErr := env.store.Load()
+	require.NoError(t, loadErr)
+	require.NotContains(t, loaded.Workers, "7")
+	require.Equal(t, domain.IssueWorkflowStatusReadyToIntegrate, loaded.Issues["7"].WorkflowStatus)
+	require.Equal(t, "commit-7", loaded.Issues["7"].Repositories["ml-svc-zcode"].CommitSHA)
+	require.Equal(t, []labelCall{{number: "7", labels: []string{"待集成"}}}, env.provider.addedLabels)
+}
+
 func TestOnceRecordsFinishedWorkerFailureAndClearsRunningStatus(t *testing.T) {
 	env := newRunnerTestEnv(t)
 	exitCode := 2
