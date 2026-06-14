@@ -482,12 +482,18 @@ func TestOnceIntegratesReadyIssueAndMarksAwaitingVerify(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(markdown), "#7 ready issue")
 	require.Contains(t, string(markdown), "`ml-svc-zcode` -> `ai-v2.0` (merge-7)")
-	var current map[string]any
+	var current struct {
+		Items []struct {
+			Number string `json:"number"`
+			Title  string `json:"title"`
+		} `json:"items"`
+	}
 	raw, err := os.ReadFile(currentValidationJSON)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &current))
-	require.Equal(t, "7", current["number"])
-	require.Equal(t, "ready issue", current["title"])
+	require.Len(t, current.Items, 1)
+	require.Equal(t, "7", current.Items[0].Number)
+	require.Equal(t, "ready issue", current.Items[0].Title)
 	hookOutput, err := os.ReadFile(integratedHookPath)
 	require.NoError(t, err)
 	require.Equal(t, "integrated:7", string(hookOutput))
@@ -1095,6 +1101,125 @@ func TestCurrentValidationMarkdownReturnsCurrentSlot(t *testing.T) {
 	require.Contains(t, markdown, "#7 ready issue")
 	require.Contains(t, markdown, "`ml-svc-zcode` -> `ai-v2.0` (merge-7)")
 	require.Contains(t, markdown, "issue-agent-runner reject 7")
+}
+
+func TestCurrentValidationMarkdownReturnsAllPendingValidations(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"7": {
+				Title:          "first ready issue",
+				WorkflowStatus: domain.IssueWorkflowStatusAwaitingVerify,
+				IntegratedAt:   env.now.Unix(),
+				Result: &domain.WorkerResult{
+					Summary:      "fixed backend",
+					Verification: []string{"rtk go test ./..."},
+				},
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-svc-zcode": {
+						Repo:                "ml-svc-zcode",
+						IssueBranch:         "cnb/issue-7/ml-svc-zcode",
+						BaselineBranch:      "ai-v2.0",
+						BaselineMergeCommit: "merge-7",
+						CommitSHA:           "commit-7",
+					},
+				},
+			},
+			"8": {
+				Title:          "second ready issue",
+				WorkflowStatus: domain.IssueWorkflowStatusAwaitingVerify,
+				IntegratedAt:   env.now.Unix() + 1,
+				Result: &domain.WorkerResult{
+					Summary:      "fixed frontend",
+					Verification: []string{"rtk npm test"},
+				},
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-web-zcode": {
+						Repo:                "ml-web-zcode",
+						IssueBranch:         "cnb/issue-8/ml-web-zcode",
+						BaselineBranch:      "poc/api-adapter-validation",
+						BaselineMergeCommit: "merge-8",
+						CommitSHA:           "commit-8",
+					},
+				},
+			},
+		},
+	}))
+
+	markdown, err := env.runner.CurrentValidationMarkdown(context.Background())
+	require.NoError(t, err)
+
+	require.Contains(t, markdown, "#7 first ready issue")
+	require.Contains(t, markdown, "`ml-svc-zcode` -> `ai-v2.0` (merge-7)")
+	require.Contains(t, markdown, "issue-agent-runner reject 7")
+	require.Contains(t, markdown, "#8 second ready issue")
+	require.Contains(t, markdown, "`ml-web-zcode` -> `poc/api-adapter-validation` (merge-8)")
+	require.Contains(t, markdown, "issue-agent-runner reject 8")
+}
+
+func TestWriteCurrentValidationFilesWritesAllPendingValidations(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	st := domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"7": {
+				Title:          "first ready issue",
+				WorkflowStatus: domain.IssueWorkflowStatusAwaitingVerify,
+				IntegratedAt:   env.now.Unix(),
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-svc-zcode": {
+						Repo:                "ml-svc-zcode",
+						BaselineBranch:      "ai-v2.0",
+						BaselineMergeCommit: "merge-7",
+					},
+				},
+			},
+			"8": {
+				Title:          "second ready issue",
+				WorkflowStatus: domain.IssueWorkflowStatusAwaitingVerify,
+				IntegratedAt:   env.now.Unix() + 1,
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-web-zcode": {
+						Repo:                "ml-web-zcode",
+						BaselineBranch:      "poc/api-adapter-validation",
+						BaselineMergeCommit: "merge-8",
+					},
+				},
+			},
+		},
+	}
+
+	err := env.runner.writeCurrentValidationFiles(nil, st)
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(filepath.Join(env.stateDir, "current-validation.json"))
+	require.NoError(t, err)
+	var current struct {
+		Items []struct {
+			Number       string `json:"number"`
+			Title        string `json:"title"`
+			Repositories []struct {
+				Repo                string `json:"repo"`
+				BaselineBranch      string `json:"baselineBranch"`
+				BaselineMergeCommit string `json:"baselineMergeCommit"`
+			} `json:"repositories"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &current))
+	require.Len(t, current.Items, 2)
+	require.Equal(t, "7", current.Items[0].Number)
+	require.Equal(t, "first ready issue", current.Items[0].Title)
+	require.Equal(t, "ml-svc-zcode", current.Items[0].Repositories[0].Repo)
+	require.Equal(t, "ai-v2.0", current.Items[0].Repositories[0].BaselineBranch)
+	require.Equal(t, "merge-7", current.Items[0].Repositories[0].BaselineMergeCommit)
+	require.Equal(t, "8", current.Items[1].Number)
+	require.Equal(t, "second ready issue", current.Items[1].Title)
+	require.Equal(t, "ml-web-zcode", current.Items[1].Repositories[0].Repo)
+	require.Equal(t, "poc/api-adapter-validation", current.Items[1].Repositories[0].BaselineBranch)
+	require.Equal(t, "merge-8", current.Items[1].Repositories[0].BaselineMergeCommit)
 }
 
 func TestCurrentValidationMarkdownReturnsEmptyMessage(t *testing.T) {

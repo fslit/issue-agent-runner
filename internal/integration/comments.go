@@ -39,7 +39,7 @@ func AwaitingVerifyComment(issue domain.Issue, state domain.IssueState, agent Ag
 			lines = append(lines, "- `"+command+"`")
 		}
 	}
-	lines = append(lines, "", "验证通过后关闭该 CNB issue；验证失败请执行 `issue-agent-runner reject "+issue.Number+"` 回滚当前验证槽。")
+	lines = append(lines, "", "验证通过后关闭该 CNB issue；验证失败请执行 `issue-agent-runner reject "+issue.Number+"` 回滚该 issue 的验证合入。")
 	return strings.Join(lines, "\n")
 }
 

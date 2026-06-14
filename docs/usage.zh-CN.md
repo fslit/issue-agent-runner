@@ -67,7 +67,7 @@ rtk go run ./cmd/issue-agent-runner status -c .local_cache/cnb-issue-runner/runn
 rtk go run ./cmd/issue-agent-runner summary -c .local_cache/cnb-issue-runner/runner.local.yaml
 ```
 
-查看当前人工验证槽：
+查看当前人工验证列表：
 
 ```bash
 rtk go run ./cmd/issue-agent-runner current -c .local_cache/cnb-issue-runner/runner.local.yaml
@@ -80,14 +80,14 @@ rtk go run ./cmd/issue-agent-runner current -c .local_cache/cnb-issue-runner/run
 /Users/m4/Documents/code/zcode/.local_cache/cnb-issue-runner/progress-summary.json
 ```
 
-如果当前有一个 issue 已经合入本地基准分支并等待人工验证，还会生成：
+如果当前有一个或多个 issue 已经合入本地基准分支并等待人工验证，还会生成：
 
 ```bash
 /Users/m4/Documents/code/zcode/.local_cache/cnb-issue-runner/current-validation.md
 /Users/m4/Documents/code/zcode/.local_cache/cnb-issue-runner/current-validation.json
 ```
 
-`current-validation.*` 只表示当前验证槽，不表示所有任务。它包含当前待验证的 issue 号、标题、基准分支、合并提交、worker 修复摘要和 worker 自测命令。执行 `reject` 或 issue 关闭后完成 push/cleanup 时，该文件会自动删除。
+`current-validation.*` 表示当前待人工验证的 issue 列表，不表示所有任务。它包含每个待验证 issue 的 issue 号、标题、基准分支、合并提交、worker 修复摘要和 worker 自测命令。执行 `reject` 或 issue 关闭后完成 push/cleanup，且没有剩余待验证 issue 时，该文件会自动删除。
 
 ## 日志查看
 
@@ -216,7 +216,7 @@ hooks:
 - `onIssueClaim`：runner 认领 issue 并成功启动 worker 后触发。
 - `onIssuePaused`：issue 因人工 pause、quota/auth、达到最大失败次数或合并冲突暂停时触发。
 - `onProgressUpdate`：每轮正常轮询写完 `progress-summary.*` 后触发。
-- `onIssueIntegrated`：issue 分支成功合入本地基准分支，进入人工验证槽后触发，适合重启本地后端/前端验证环境。
+- `onIssueIntegrated`：issue 分支成功合入本地基准分支，进入待验证状态后触发，适合重启本地后端/前端验证环境。
 - `onIssueRejected`：人工验证失败并执行 `reject` 回滚后触发。
 - `onIssueClosedPushed`：CNB issue 关闭，基准分支 push 成功并清理 issue worktree/branch 后触发。
 
@@ -285,7 +285,7 @@ ml-svc-zcode -> ai-v2.0
 ml-web-zcode -> poc/api-adapter-validation
 ```
 
-当前验证哪个 issue 以 `current-validation.md` 为准。这样用户只需要验证正常基准分支对应的本地环境，不需要知道或切换 `cnb/issue-*` 分支。
+当前有哪些 issue 等待验证以 `current-validation.md` 为准。这样用户只需要验证正常基准分支对应的本地环境，不需要知道或切换 `cnb/issue-*` 分支。
 
 也可以直接执行：
 

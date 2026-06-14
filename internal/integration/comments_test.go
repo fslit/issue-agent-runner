@@ -24,6 +24,8 @@ func TestAwaitingVerifyCommentIncludesMergedReposAndVerification(t *testing.T) {
 	require.Contains(t, comment, "fix timeline toggle visibility")
 	require.Contains(t, comment, "`ml-svc-zcode` -> `ai-v2.0` (abc123)")
 	require.Contains(t, comment, "`rtk go test ./...`")
+	require.Contains(t, comment, "回滚该 issue 的验证合入")
+	require.NotContains(t, comment, "验证槽")
 }
 
 func TestMergeConflictCommentIncludesConflictFiles(t *testing.T) {

@@ -97,11 +97,11 @@ Runtime files:
 /Users/m4/Documents/code/zcode/.local_cache/cnb-issue-runner/current-validation.json
 ```
 
-`current-validation.*` is created only while an issue is merged into the local
-baseline branches and is waiting for human verification. It records the current
-issue number, touched baseline branches, merge commits, worker summary, and
-worker verification commands. It is removed after `reject` or after the issue is
-closed, pushed, and cleaned.
+`current-validation.*` is created while one or more issues are merged into the
+local baseline branches and are waiting for human verification. It records each
+pending issue number, touched baseline branches, merge commits, worker summary,
+and worker verification commands. It is removed when no issues are awaiting
+verification after `reject` or after issues are closed, pushed, and cleaned.
 
 ## CNB Callback
 

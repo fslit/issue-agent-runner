@@ -64,6 +64,10 @@ type Runner struct {
 	dryRun   bool
 }
 
+type currentValidationReport struct {
+	Items []currentValidation `json:"items"`
+}
+
 type currentValidation struct {
 	Number         string                     `json:"number"`
 	Title          string                     `json:"title,omitempty"`
@@ -1016,10 +1020,10 @@ func (r *Runner) writeReports(issues []domain.Issue, st domain.State, now time.T
 }
 
 func (r *Runner) writeCurrentValidationFiles(issues []domain.Issue, st domain.State) error {
-	current := buildCurrentValidation(issues, st)
+	current := buildCurrentValidationReport(issues, st)
 	markdownPath := filepath.Join(r.cfg.Paths.StateDir, "current-validation.md")
 	jsonPath := filepath.Join(r.cfg.Paths.StateDir, "current-validation.json")
-	if current == nil {
+	if len(current.Items) == 0 {
 		if err := os.Remove(markdownPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -1028,7 +1032,7 @@ func (r *Runner) writeCurrentValidationFiles(issues []domain.Issue, st domain.St
 		}
 		return nil
 	}
-	if err := os.WriteFile(markdownPath, []byte(renderCurrentValidationMarkdown(*current)), 0o644); err != nil {
+	if err := os.WriteFile(markdownPath, []byte(renderCurrentValidationMarkdown(current)), 0o644); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(current, "", "  ")
@@ -1039,7 +1043,7 @@ func (r *Runner) writeCurrentValidationFiles(issues []domain.Issue, st domain.St
 	return os.WriteFile(jsonPath, raw, 0o644)
 }
 
-func buildCurrentValidation(issues []domain.Issue, st domain.State) *currentValidation {
+func buildCurrentValidationReport(issues []domain.Issue, st domain.State) currentValidationReport {
 	st.Normalize()
 	issueTitles := map[string]string{}
 	for _, issue := range issues {
@@ -1057,7 +1061,7 @@ func buildCurrentValidation(issues []domain.Issue, st domain.State) *currentVali
 		}
 	}
 	if len(candidates) == 0 {
-		return nil
+		return currentValidationReport{}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].meta.IntegratedAt == candidates[j].meta.IntegratedAt {
@@ -1066,23 +1070,30 @@ func buildCurrentValidation(issues []domain.Issue, st domain.State) *currentVali
 		return candidates[i].meta.IntegratedAt < candidates[j].meta.IntegratedAt
 	})
 
-	selected := candidates[0]
-	title := selected.meta.Title
+	items := make([]currentValidation, 0, len(candidates))
+	for _, candidate := range candidates {
+		items = append(items, buildCurrentValidationItem(candidate.number, candidate.meta, issueTitles))
+	}
+	return currentValidationReport{Items: items}
+}
+
+func buildCurrentValidationItem(number string, meta domain.IssueState, issueTitles map[string]string) currentValidation {
+	title := meta.Title
 	if title == "" {
-		title = issueTitles[selected.number]
+		title = issueTitles[number]
 	}
-	current := &currentValidation{
-		Number:         selected.number,
+	current := currentValidation{
+		Number:         number,
 		Title:          title,
-		WorkflowStatus: selected.meta.WorkflowStatus,
-		IntegratedAt:   selected.meta.IntegratedAt,
+		WorkflowStatus: meta.WorkflowStatus,
+		IntegratedAt:   meta.IntegratedAt,
 	}
-	if selected.meta.Result != nil {
-		current.Summary = selected.meta.Result.Summary
-		current.Verification = append([]string(nil), selected.meta.Result.Verification...)
+	if meta.Result != nil {
+		current.Summary = meta.Result.Summary
+		current.Verification = append([]string(nil), meta.Result.Verification...)
 	}
-	for _, repoName := range sortedRepoNames(selected.meta.Repositories) {
-		repo := selected.meta.Repositories[repoName]
+	for _, repoName := range sortedRepoNames(meta.Repositories) {
+		repo := meta.Repositories[repoName]
 		current.Repositories = append(current.Repositories, currentValidationRepo{
 			Repo:                repoName,
 			BaselineBranch:      repo.BaselineBranch,
@@ -1094,21 +1105,35 @@ func buildCurrentValidation(issues []domain.Issue, st domain.State) *currentVali
 	return current
 }
 
-func renderCurrentValidationMarkdown(current currentValidation) string {
+func renderCurrentValidationMarkdown(current currentValidationReport) string {
 	lines := []string{
-		"# Current Validation",
+		"# Current Validations",
 		"",
-		fmt.Sprintf("- Issue: #%s %s", current.Number, current.Title),
+	}
+	for index, item := range current.Items {
+		if index > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, renderCurrentValidationItemMarkdown(item)...)
+	}
+	lines = append(lines, "")
+	return strings.Join(lines, "\n")
+}
+
+func renderCurrentValidationItemMarkdown(current currentValidation) []string {
+	lines := []string{
+		"## " + currentValidationIssueLabel(current),
+		"",
 		fmt.Sprintf("- Status: %s", current.WorkflowStatus),
 	}
 	if current.IntegratedAt > 0 {
 		lines = append(lines, fmt.Sprintf("- Integrated at: %s", time.Unix(current.IntegratedAt, 0).Format("2006-01-02 15:04:05 MST")))
 	}
 	if current.Summary != "" {
-		lines = append(lines, "", "## Summary", current.Summary)
+		lines = append(lines, "", "### Summary", current.Summary)
 	}
 	if len(current.Repositories) > 0 {
-		lines = append(lines, "", "## Baseline Branches")
+		lines = append(lines, "", "### Baseline Branches")
 		for _, repo := range current.Repositories {
 			if repo.BaselineMergeCommit != "" {
 				lines = append(lines, fmt.Sprintf("- `%s` -> `%s` (%s)", repo.Repo, repo.BaselineBranch, repo.BaselineMergeCommit))
@@ -1118,13 +1143,19 @@ func renderCurrentValidationMarkdown(current currentValidation) string {
 		}
 	}
 	if len(current.Verification) > 0 {
-		lines = append(lines, "", "## Worker Verification")
+		lines = append(lines, "", "### Worker Verification")
 		for _, command := range current.Verification {
 			lines = append(lines, "- `"+command+"`")
 		}
 	}
-	lines = append(lines, "", fmt.Sprintf("验证通过后关闭 CNB issue #%s；验证失败执行 `issue-agent-runner reject %s`。", current.Number, current.Number), "")
-	return strings.Join(lines, "\n")
+	return append(lines, "", fmt.Sprintf("验证通过后关闭 CNB issue #%s；验证失败执行 `issue-agent-runner reject %s`。", current.Number, current.Number))
+}
+
+func currentValidationIssueLabel(current currentValidation) string {
+	if current.Title == "" {
+		return "#" + current.Number
+	}
+	return fmt.Sprintf("#%s %s", current.Number, current.Title)
 }
 
 func sortedRepoNames(items map[string]domain.IssueRepoState) []string {
@@ -1324,11 +1355,11 @@ func (r *Runner) CurrentValidationMarkdown(ctx context.Context) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	current := buildCurrentValidation(nil, *st)
-	if current == nil {
+	current := buildCurrentValidationReport(nil, *st)
+	if len(current.Items) == 0 {
 		return "No issue is currently awaiting manual validation.\n", nil
 	}
-	return renderCurrentValidationMarkdown(*current), nil
+	return renderCurrentValidationMarkdown(current), nil
 }
 
 func (r *Runner) Pause(ctx context.Context, numbers []string, reason string) error {
