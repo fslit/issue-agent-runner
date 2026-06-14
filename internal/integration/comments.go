@@ -70,6 +70,23 @@ func RejectComment(issue domain.Issue, agent AgentInfo) string {
 	return strings.Join(lines, "\n")
 }
 
+func WorkerFailureComment(issue domain.Issue, state domain.IssueState, agent AgentInfo) string {
+	lines := []string{
+		fmt.Sprintf("问题 #%s 已失败并暂停，等待人工处理。", issue.Number),
+	}
+	lines = appendAgentInfo(lines, agent)
+	if state.Attempts > 0 {
+		lines = append(lines, "", fmt.Sprintf("已失败 %d 次。", state.Attempts))
+	}
+	if state.LastError != "" {
+		lines = append(lines, "", "失败原因:", state.LastError)
+	}
+	if state.PauseReason != "" {
+		lines = append(lines, "", "暂停原因:", state.PauseReason)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func ClosedPushedComment(issue domain.Issue, state domain.IssueState, agent AgentInfo) string {
 	lines := []string{
 		fmt.Sprintf("问题 #%s 已关闭。基准分支已推送，相关本地 issue worktree/branch 已清理。", issue.Number),

@@ -300,7 +300,7 @@ func TestOnceClearsWorkflowLabelsWhenWorkerFailureWillRetry(t *testing.T) {
 	require.Empty(t, env.provider.addedLabels)
 }
 
-func TestOnceMarksNeedsHumanWhenWorkerFailurePausesIssue(t *testing.T) {
+func TestOnceMarksFailedWhenWorkerFailurePausesIssue(t *testing.T) {
 	env := newRunnerTestEnv(t)
 	exitCode := 1
 	require.NoError(t, env.store.Save(&domain.State{
@@ -332,8 +332,12 @@ func TestOnceMarksNeedsHumanWhenWorkerFailurePausesIssue(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, loaded.Issues["7"].Paused)
 	require.Equal(t, "failed 3 attempts", loaded.Issues["7"].PauseReason)
+	require.Equal(t, env.now.Unix(), loaded.Issues["7"].FailureCommentedAt)
 	require.Equal(t, []labelCall{workflowCleanupLabelCall("7")}, env.provider.removedLabels)
-	require.Equal(t, []labelCall{{number: "7", labels: []string{"需人工确认"}}}, env.provider.addedLabels)
+	require.Equal(t, []labelCall{{number: "7", labels: []string{"处理失败"}}}, env.provider.addedLabels)
+	require.Len(t, env.provider.comments, 1)
+	require.Contains(t, env.provider.comments[0], "等待人工处理")
+	require.Contains(t, env.provider.comments[0], "失败 3 次")
 }
 
 func TestOnceRunsPausedHookWhenWorkerFailurePausesIssue(t *testing.T) {
@@ -702,6 +706,67 @@ func TestOnceSyncsExistingWorkflowLabels(t *testing.T) {
 		{number: "7", labels: []string{"待集成"}},
 		{number: "8", labels: []string{"待验证"}},
 	}, env.provider.addedLabels)
+}
+
+func TestOnceCorrectsPausedWorkerFailureWorkflowLabel(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"43": {
+				Attempts:       1,
+				Paused:         true,
+				PauseReason:    "unexpected status 502 Bad Gateway",
+				LastError:      "unexpected status 502 Bad Gateway",
+				ErrorKind:      domain.ErrorAuth,
+				WorkflowStatus: domain.IssueWorkflowStatusUnknown,
+			},
+		},
+	}))
+	env.provider.issues = []domain.Issue{{Number: "43", Title: "auth failure", State: "open", Labels: []string{"需人工确认"}}}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	require.Equal(t, []labelCall{workflowCleanupLabelCall("43")}, env.provider.removedLabels)
+	require.Equal(t, []labelCall{{number: "43", labels: []string{"处理失败"}}}, env.provider.addedLabels)
+	require.Len(t, env.provider.comments, 1)
+	require.Contains(t, env.provider.comments[0], "等待人工处理")
+	require.Contains(t, env.provider.comments[0], "unexpected status 502 Bad Gateway")
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	require.Equal(t, env.now.Unix(), loaded.Issues["43"].FailureCommentedAt)
+}
+
+func TestOnceBackfillsPausedFailureCommentWhenFailedLabelAlreadyPresent(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"43": {
+				Attempts:       1,
+				Paused:         true,
+				PauseReason:    "unexpected status 502 Bad Gateway",
+				LastError:      "unexpected status 502 Bad Gateway",
+				ErrorKind:      domain.ErrorAuth,
+				WorkflowStatus: domain.IssueWorkflowStatusUnknown,
+			},
+		},
+	}))
+	env.provider.issues = []domain.Issue{{Number: "43", Title: "auth failure", State: "open", Labels: []string{"处理失败"}}}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	require.Empty(t, env.provider.removedLabels)
+	require.Empty(t, env.provider.addedLabels)
+	require.Len(t, env.provider.comments, 1)
+	require.Contains(t, env.provider.comments[0], "等待人工处理")
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	require.Equal(t, env.now.Unix(), loaded.Issues["43"].FailureCommentedAt)
 }
 
 func TestRunHookPostsConfiguredWebhook(t *testing.T) {

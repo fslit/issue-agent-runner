@@ -108,6 +108,7 @@ func ApplyFailure(issueNumber string, worker domain.WorkerState, result domain.W
 	meta.NextRetryAt = now.Unix() + backoffSeconds(kind, cfg)
 	meta.Title = worker.Title
 	meta.WorkflowStatus = domain.IssueWorkflowStatusUnknown
+	meta.FailureCommentedAt = 0
 
 	if kind == domain.ErrorQuota || kind == domain.ErrorAuth {
 		meta.Paused = true

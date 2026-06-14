@@ -112,6 +112,22 @@ func TestSavePreservesUnknownIssueFields(t *testing.T) {
 }`, string(raw))
 }
 
+func TestSaveAndLoadPreservesFailureCommentedAt(t *testing.T) {
+	stateDir := t.TempDir()
+	store := New(stateDir)
+	require.NoError(t, store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"43": {FailureCommentedAt: 1781378944},
+		},
+	}))
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	require.Equal(t, int64(1781378944), loaded.Issues["43"].FailureCommentedAt)
+}
+
 func TestWithLockLoadsMutatesAndSaves(t *testing.T) {
 	stateDir := t.TempDir()
 	store := New(stateDir)

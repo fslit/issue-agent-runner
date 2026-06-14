@@ -131,6 +131,7 @@ type IssueState struct {
 	PauseReason          string                     `json:"pauseReason,omitempty"`
 	LastExitCode         *int                       `json:"lastExitCode,omitempty"`
 	LastError            string                     `json:"lastError,omitempty"`
+	FailureCommentedAt   int64                      `json:"failureCommentedAt,omitempty"`
 	ErrorKind            ErrorKind                  `json:"errorKind,omitempty"`
 	LastStartedAt        int64                      `json:"lastStartedAt,omitempty"`
 	LastFinishedAt       int64                      `json:"lastFinishedAt,omitempty"`
@@ -190,6 +191,9 @@ func (s *IssueState) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if err := decode("lastError", &s.LastError); err != nil {
+		return err
+	}
+	if err := decodeFlexibleTime(values, "failureCommentedAt", &s.FailureCommentedAt); err != nil {
 		return err
 	}
 	if err := decode("errorKind", &s.ErrorKind); err != nil {
@@ -260,6 +264,9 @@ func (s IssueState) MarshalJSON() ([]byte, error) {
 	}
 	if s.LastError != "" {
 		values["lastError"] = s.LastError
+	}
+	if s.FailureCommentedAt != 0 {
+		values["failureCommentedAt"] = s.FailureCommentedAt
 	}
 	if s.ErrorKind != "" {
 		values["errorKind"] = s.ErrorKind

@@ -194,7 +194,7 @@ func (r *Runner) pruneWorkers(ctx context.Context, st *domain.State, now time.Ti
 					ErrorKind:    domain.ErrorTimeout,
 					ErrorMessage: "worker hard timeout; terminated for retry",
 				}, now, r.cfg.Runner, st)
-				r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
+				st.Issues[number] = r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
 				r.logWorkerFailed(number, st.Issues[number])
 				r.runPausedHookIfNeeded(ctx, number, st.Issues[number])
 				delete(st.Workers, number)
@@ -209,7 +209,7 @@ func (r *Runner) pruneWorkers(ctx context.Context, st *domain.State, now time.Ti
 					ErrorKind:    domain.ErrorStale,
 					ErrorMessage: "worker log stale; terminated for retry",
 				}, now, r.cfg.Runner, st)
-				r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
+				st.Issues[number] = r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
 				r.logWorkerFailed(number, st.Issues[number])
 				r.runPausedHookIfNeeded(ctx, number, st.Issues[number])
 				delete(st.Workers, number)
@@ -225,7 +225,7 @@ func (r *Runner) pruneWorkers(ctx context.Context, st *domain.State, now time.Ti
 			}
 		} else {
 			ApplyFailure(number, worker, result, now, r.cfg.Runner, st)
-			r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
+			st.Issues[number] = r.syncFailureWorkflowLabels(ctx, number, st.Issues[number])
 			r.logWorkerFailed(number, st.Issues[number])
 			r.runPausedHookIfNeeded(ctx, number, st.Issues[number])
 		}
@@ -283,7 +283,7 @@ func (r *Runner) claimAndStart(ctx context.Context, issue domain.Issue, st *doma
 		ApplyFailure(issue.Number, domain.WorkerState{IssueNumber: issue.Number, Title: issue.Title}, domain.WorkerResult{
 			ErrorMessage: err.Error(),
 		}, now, r.cfg.Runner, st)
-		r.syncFailureWorkflowLabels(ctx, issue.Number, st.Issues[issue.Number])
+		st.Issues[issue.Number] = r.syncFailureWorkflowLabels(ctx, issue.Number, st.Issues[issue.Number])
 		r.logEvent("worker_start_failed", map[string]any{"issue": issue.Number, "error": err.Error()})
 		return nil
 	}
@@ -302,6 +302,7 @@ func (r *Runner) claimAndStart(ctx context.Context, issue domain.Issue, st *doma
 	meta.NextRetryAt = 0
 	meta.Paused = false
 	meta.PauseReason = ""
+	meta.FailureCommentedAt = 0
 	meta.WorkflowStatus = domain.IssueWorkflowStatusRunning
 	meta.AgentModel = r.cfg.Executor.Model
 	meta.AgentReasoningEffort = r.cfg.Executor.ReasoningEffort
@@ -740,12 +741,62 @@ func (r *Runner) syncWorkflowLabelsBestEffort(ctx context.Context, number string
 	}
 }
 
-func (r *Runner) syncFailureWorkflowLabels(ctx context.Context, number string, meta domain.IssueState) {
-	status := domain.IssueWorkflowStatusUnknown
-	if meta.Paused {
-		status = domain.IssueWorkflowStatusMergeConflict
+func (r *Runner) syncFailureWorkflowLabels(ctx context.Context, number string, meta domain.IssueState) domain.IssueState {
+	if !meta.Paused {
+		r.syncWorkflowLabelsBestEffort(ctx, number, domain.IssueWorkflowStatusUnknown)
+		return meta
 	}
-	r.syncWorkflowLabelsBestEffort(ctx, number, status)
+
+	issue, err := r.provider.Get(ctx, number)
+	if err != nil {
+		r.logEvent("workflow_label_sync_failed", map[string]any{"issue": number, "status": "PAUSED_FAILURE", "error": err.Error()})
+		issue = issueFromState(number, meta)
+	}
+	if issue.Number == "" {
+		issue = issueFromState(number, meta)
+	}
+	updated, err := r.syncPausedFailureWorkflow(ctx, issue, meta)
+	if err != nil {
+		r.logEvent("workflow_label_sync_failed", map[string]any{"issue": number, "status": "PAUSED_FAILURE", "error": err.Error()})
+		return meta
+	}
+	return updated
+}
+
+func (r *Runner) syncPausedFailureWorkflow(ctx context.Context, issue domain.Issue, meta domain.IssueState) (domain.IssueState, error) {
+	currentLabels := labelSet(issue.Labels)
+	desiredLabel := r.cfg.Labels.Failed
+	hasDesiredLabel := desiredLabel != "" && currentLabels[desiredLabel]
+	needsCleanup := false
+	for _, label := range workflowStateLabels(r.cfg.Labels) {
+		if label != desiredLabel && currentLabels[label] {
+			needsCleanup = true
+			break
+		}
+	}
+	labelsClean := !needsCleanup && hasDesiredLabel
+	if labelsClean && meta.FailureCommentedAt != 0 {
+		return meta, nil
+	}
+
+	if !labelsClean {
+		if err := r.provider.RemoveLabels(ctx, issue.Number, workflowStateLabels(r.cfg.Labels)); err != nil {
+			return meta, err
+		}
+		if desiredLabel != "" {
+			if err := r.provider.AddLabels(ctx, issue.Number, []string{desiredLabel}); err != nil {
+				return meta, err
+			}
+		}
+	}
+	if meta.FailureCommentedAt != 0 {
+		return meta, nil
+	}
+	if err := r.provider.AddComment(ctx, issue.Number, integration.WorkerFailureComment(issue, meta, r.agentInfo(meta))); err != nil {
+		return meta, err
+	}
+	meta.FailureCommentedAt = r.now().Unix()
+	return meta, nil
 }
 
 func (r *Runner) syncKnownWorkflowLabels(ctx context.Context, issues []domain.Issue, st domain.State, handled map[string]bool) error {
@@ -754,11 +805,26 @@ func (r *Runner) syncKnownWorkflowLabels(ctx context.Context, issues []domain.Is
 			continue
 		}
 		meta := st.Issues[issue.Number]
+		if isPausedWorkerFailure(meta) {
+			updated, err := r.syncPausedFailureWorkflow(ctx, issue, meta)
+			if err != nil {
+				return err
+			}
+			st.Issues[issue.Number] = updated
+			continue
+		}
 		if err := r.syncKnownIssueWorkflowLabels(ctx, issue, meta.WorkflowStatus); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func isPausedWorkerFailure(meta domain.IssueState) bool {
+	if !meta.Paused || meta.WorkflowStatus != domain.IssueWorkflowStatusUnknown {
+		return false
+	}
+	return (meta.ErrorKind != domain.ErrorNone && meta.ErrorKind != "") || meta.Attempts > 0 || meta.LastError != ""
 }
 
 func (r *Runner) syncKnownIssueWorkflowLabels(ctx context.Context, issue domain.Issue, status domain.IssueWorkflowStatus) error {
@@ -877,6 +943,7 @@ func (r *Runner) applySuccess(ctx context.Context, number string, worker domain.
 	}
 	meta.LastError = ""
 	meta.ErrorKind = domain.ErrorNone
+	meta.FailureCommentedAt = 0
 	meta.LastFinishedAt = now.Unix()
 	meta.NextRetryAt = 0
 	meta.Title = worker.Title

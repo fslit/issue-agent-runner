@@ -50,6 +50,21 @@ func TestRejectCommentIncludesIssueNumber(t *testing.T) {
 	require.Contains(t, comment, "人工验证未通过")
 }
 
+func TestWorkerFailureCommentIncludesPauseReasonAndAttempts(t *testing.T) {
+	comment := WorkerFailureComment(domain.Issue{Number: "43"}, domain.IssueState{
+		Attempts:    3,
+		LastError:   "unexpected status 502 Bad Gateway",
+		PauseReason: "failed 3 attempts",
+	}, AgentInfo{Model: "gpt-5.5", ReasoningEffort: "xhigh"})
+
+	require.Contains(t, comment, "问题 #43")
+	require.Contains(t, comment, "等待人工处理")
+	require.Contains(t, comment, "失败 3 次")
+	require.Contains(t, comment, "unexpected status 502 Bad Gateway")
+	require.Contains(t, comment, "failed 3 attempts")
+	require.Contains(t, comment, "Model: `gpt-5.5` (reasoning: `xhigh`)")
+}
+
 func TestClosedPushedCommentIncludesPushedShas(t *testing.T) {
 	comment := ClosedPushedComment(domain.Issue{Number: "92"}, domain.IssueState{
 		Repositories: map[string]domain.IssueRepoState{
