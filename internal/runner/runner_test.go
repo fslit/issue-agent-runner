@@ -631,6 +631,99 @@ func TestOncePushesExistingAwaitingVerifyIssueForRemoteValidation(t *testing.T) 
 	require.Equal(t, []labelCall{{number: "7", labels: []string{"待验证"}}}, env.provider.addedLabels)
 }
 
+func TestOnceIntegratesReadyIssueWhenPendingVerifyIsAllowed(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	env.cfg.Integration.AllowSinglePendingVerify = true
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"7": {
+				WorkflowStatus: domain.IssueWorkflowStatusAwaitingVerify,
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-web-zcode": {
+						Repo:                "ml-web-zcode",
+						RepoPath:            filepath.Join(env.stateDir, "ml-web-zcode"),
+						IssueBranch:         "cnb/issue-7/ml-web-zcode",
+						BaselineBranch:      "poc/api-adapter-validation",
+						BaselineMergeCommit: "merge-7",
+						PushedBaselineSHA:   "push-7",
+						CommitSHA:           "commit-7",
+					},
+				},
+			},
+			"8": {
+				Title:          "next ready issue",
+				WorkflowStatus: domain.IssueWorkflowStatusReadyToIntegrate,
+				ReadyAt:        env.now.Unix() - 10,
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-web-zcode": {
+						Repo:           "ml-web-zcode",
+						RepoPath:       filepath.Join(env.stateDir, "ml-web-zcode"),
+						IssueBranch:    "cnb/issue-8/ml-web-zcode",
+						BaselineBranch: "poc/api-adapter-validation",
+						CommitSHA:      "commit-8",
+					},
+				},
+			},
+		},
+	}))
+	env.provider.issues = []domain.Issue{
+		{Number: "7", Title: "verify issue", State: "open", Labels: []string{"待验证"}},
+		{Number: "8", Title: "next ready issue", State: "open", Labels: []string{"待集成"}},
+	}
+	env.gitOps.mergeResults = map[string]gitops.MergeResult{"ml-web-zcode": {MergeCommit: "merge-8"}}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	require.Equal(t, domain.IssueWorkflowStatusAwaitingVerify, loaded.Issues["8"].WorkflowStatus)
+	require.Equal(t, "merge-8", loaded.Issues["8"].Repositories["ml-web-zcode"].BaselineMergeCommit)
+	require.Equal(t, "push-ml-web-zcode", loaded.Issues["8"].Repositories["ml-web-zcode"].PushedBaselineSHA)
+	require.Equal(t, []string{"ml-web-zcode:cnb/issue-8/ml-web-zcode"}, env.gitOps.merged)
+	require.Equal(t, []labelCall{{number: "8", labels: []string{"待验证"}}}, env.provider.addedLabels)
+}
+
+func TestOnceBlocksReadyIssueWhenSinglePendingVerifyIsRequired(t *testing.T) {
+	env := newRunnerTestEnv(t)
+	env.cfg.Integration.AllowSinglePendingVerify = false
+	require.NoError(t, env.store.Save(&domain.State{
+		Version: 1,
+		Workers: map[string]domain.WorkerState{},
+		Issues: map[string]domain.IssueState{
+			"7": {WorkflowStatus: domain.IssueWorkflowStatusAwaitingVerify},
+			"8": {
+				Title:          "next ready issue",
+				WorkflowStatus: domain.IssueWorkflowStatusReadyToIntegrate,
+				ReadyAt:        env.now.Unix() - 10,
+				Repositories: map[string]domain.IssueRepoState{
+					"ml-web-zcode": {
+						Repo:           "ml-web-zcode",
+						RepoPath:       filepath.Join(env.stateDir, "ml-web-zcode"),
+						IssueBranch:    "cnb/issue-8/ml-web-zcode",
+						BaselineBranch: "poc/api-adapter-validation",
+						CommitSHA:      "commit-8",
+					},
+				},
+			},
+		},
+	}))
+	env.provider.issues = []domain.Issue{
+		{Number: "7", Title: "verify issue", State: "open", Labels: []string{"待验证"}},
+		{Number: "8", Title: "next ready issue", State: "open", Labels: []string{"待集成"}},
+	}
+
+	err := env.runner.Once(context.Background())
+	require.NoError(t, err)
+
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	require.Equal(t, domain.IssueWorkflowStatusReadyToIntegrate, loaded.Issues["8"].WorkflowStatus)
+	require.Empty(t, env.gitOps.merged)
+}
+
 func TestOnceContinuesWhenIntegratedHookFails(t *testing.T) {
 	env := newRunnerTestEnv(t)
 	env.cfg.Hooks.OnIssueIntegrated.Command = "printf hook-boom; exit 42"
@@ -679,6 +772,7 @@ func TestOnceContinuesWhenIntegratedHookFails(t *testing.T) {
 
 func TestOnceSyncsExistingWorkflowLabels(t *testing.T) {
 	env := newRunnerTestEnv(t)
+	env.cfg.Integration.AllowSinglePendingVerify = false
 	require.NoError(t, env.store.Save(&domain.State{
 		Version: 1,
 		Workers: map[string]domain.WorkerState{},

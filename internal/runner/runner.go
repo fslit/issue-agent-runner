@@ -408,7 +408,7 @@ func (r *Runner) prepareTaskRepositories(ctx context.Context, issueNumber string
 }
 
 func (r *Runner) processIntegrationQueue(ctx context.Context, issues []domain.Issue, st *domain.State, now time.Time, handled map[string]bool) error {
-	if r.gitOps == nil || hasAwaitingVerify(st) {
+	if r.gitOps == nil || r.integrationBlockedByPendingVerify(st) {
 		return nil
 	}
 
@@ -604,6 +604,13 @@ func hasAwaitingVerify(st *domain.State) bool {
 		}
 	}
 	return false
+}
+
+func (r *Runner) integrationBlockedByPendingVerify(st *domain.State) bool {
+	if r.cfg.Integration.AllowSinglePendingVerify {
+		return false
+	}
+	return hasAwaitingVerify(st)
 }
 
 func nextReadyIssue(st *domain.State) (string, bool) {
