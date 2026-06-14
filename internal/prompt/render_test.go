@@ -78,3 +78,27 @@ func TestWorkerPromptRequiresChineseCommitDescriptions(t *testing.T) {
 	require.Contains(t, rendered, "验证:")
 	require.Contains(t, rendered, "所有 CNB 评论、任务回复、阻塞说明和完成说明都必须使用中文")
 }
+
+func TestWorkerPromptForbidsPushingIssueBranches(t *testing.T) {
+	templatePath := filepath.Join("..", "..", "templates", "worker_prompt.md")
+	rendered, err := RenderFile(templatePath, Data{
+		RepoURL:       "https://cnb.cool/dianyuniot/mlink/ml-web-zcode",
+		Number:        "45",
+		Title:         "data source filter",
+		Body:          "body text",
+		ResultPath:    "/tmp/result.json",
+		CommandPrefix: "rtk",
+		Repositories: []RepositoryData{
+			{
+				Name:           "ml-web-zcode",
+				WorktreePath:   "/tmp/worktrees/issue-45/ml-web-zcode",
+				IssueBranch:    "cnb/issue-45/ml-web-zcode",
+				BaselineBranch: "poc/api-adapter-validation",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	require.Contains(t, rendered, "不要 push `cnb/issue-*` 分支")
+	require.Contains(t, rendered, "`cnb/issue-*` 是本地临时分支")
+}

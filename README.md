@@ -35,14 +35,14 @@ issue-agent-runner reject -c configs/runner.example.yaml 35
 ## Workflow
 
 1. The runner claims an open issue and creates local issue worktrees for each configured repo.
-2. Codex works only inside those issue worktrees and commits locally on issue branches.
+2. Codex works only inside those issue worktrees and commits locally on issue branches. `cnb/issue-*` branches are temporary local branches and must not be pushed to remote.
 3. When the worker succeeds, the runner records structured git metadata and marks the issue `READY_TO_INTEGRATE`.
 4. The runner merges at most one ready issue at a time into the local baseline branches:
    - `ml-svc-zcode -> ai-v2.0`
    - `ml-web-zcode -> poc/api-adapter-validation`
 5. Users verify the normal baseline environment. They do not need to know the issue branch names.
 6. If verification fails, run `issue-agent-runner reject ISSUE` to revert the pending baseline merge commit and return the issue to the queue.
-7. If verification passes, close the CNB issue. The runner detects closure, pushes the touched baseline branches, comments the pushed SHAs, and cleans local issue branches/worktrees.
+7. If verification passes, close the CNB issue. The runner detects closure, pushes the touched baseline branches, comments the pushed SHAs, and deletes local issue branches/worktrees.
 
 ## Quick Start
 

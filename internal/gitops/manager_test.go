@@ -34,6 +34,27 @@ func TestPrepareIssueWorktreeCreatesBranchAndPath(t *testing.T) {
 	require.Equal(t, worktree.IssueBranch, current)
 }
 
+func TestPrepareIssueWorktreeDoesNotSetIssueBranchUpstream(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+	repo := config.RepositoryConfig{
+		Name:              "ml-svc-zcode",
+		Path:              repoPath,
+		IssueBranchPrefix: "cnb",
+		BaselineBranch:    "ai-v2.0",
+	}
+
+	worktree, err := manager.PrepareIssueWorktree(context.Background(), t.TempDir(), "77", repo)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.CleanupIssueWorktree(context.Background(), repoPath, worktree.WorktreePath, worktree.IssueBranch))
+	})
+
+	upstream, err := runGit(context.Background(), worktree.WorktreePath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	require.Error(t, err)
+	require.Empty(t, upstream)
+}
+
 func TestPrepareIssueWorktreeReusesExistingBranchWorktree(t *testing.T) {
 	repoPath := createTestRepoWithBaseline(t, "poc/api-adapter-validation")
 	manager := New()
@@ -278,6 +299,18 @@ func TestPushBaselineBranchUpdatesOrigin(t *testing.T) {
 	originSHA, err := runGit(context.Background(), repoPath, "ls-remote", "origin", "refs/heads/"+repo.BaselineBranch)
 	require.NoError(t, err)
 	require.Contains(t, originSHA, pushedSHA)
+}
+
+func TestPushBaselineBranchRefusesTemporaryIssueBranch(t *testing.T) {
+	repoPath := createTestRepo(t)
+	manager := New()
+
+	_, err := manager.PushBaselineBranch(context.Background(), repoPath, "cnb/issue-77/ml-svc-zcode")
+	require.ErrorContains(t, err, "refusing to push temporary issue branch")
+
+	originSHA, remoteErr := runGit(context.Background(), repoPath, "ls-remote", "origin", "refs/heads/cnb/issue-77/ml-svc-zcode")
+	require.NoError(t, remoteErr)
+	require.Empty(t, originSHA)
 }
 
 func TestCleanupIssueWorktreeRemovesWorktreeAndBranch(t *testing.T) {

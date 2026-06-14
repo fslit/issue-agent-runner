@@ -287,6 +287,8 @@ ml-web-zcode -> poc/api-adapter-validation
 
 当前有哪些 issue 等待验证以 `current-validation.md` 为准。这样用户只需要验证正常基准分支对应的本地环境，不需要知道或切换 `cnb/issue-*` 分支。
 
+`cnb/issue-*` 分支默认只作为本地临时分支使用，不能 push 到远端；runner 只会 push `ai-v2.0`、`poc/api-adapter-validation` 等目标验证分支。
+
 也可以直接执行：
 
 ```bash
@@ -306,7 +308,7 @@ rtk go run ./cmd/issue-agent-runner reject -c .local_cache/cnb-issue-runner/runn
 关闭 CNB issue
 ```
 
-runner 检测到 issue closed 后，会 push 相关基准分支，并清理本地 issue worktree/branch。
+runner 检测到 issue closed 后，会 push 相关基准分支，并删除本地 issue worktree/branch。
 
 ## 常见排查
 

@@ -173,6 +173,9 @@ func (m *Manager) RevertMergeCommit(ctx context.Context, repoPath string, baseli
 }
 
 func (m *Manager) PushBaselineBranch(ctx context.Context, repoPath string, baselineBranch string) (string, error) {
+	if isTemporaryIssueBranch(baselineBranch) {
+		return "", fmt.Errorf("refusing to push temporary issue branch %s", baselineBranch)
+	}
 	pushPath, found, err := m.existingIntegrationWorktree(ctx, repoPath, baselineBranch)
 	if err != nil {
 		return "", err
@@ -362,6 +365,10 @@ func issueBranchName(issueNumber string, repo config.RepositoryConfig) string {
 		prefix = "cnb"
 	}
 	return fmt.Sprintf("%s/issue-%s/%s", prefix, issueNumber, repo.Name)
+}
+
+func isTemporaryIssueBranch(branch string) bool {
+	return strings.HasPrefix(branch, "cnb/issue-")
 }
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {

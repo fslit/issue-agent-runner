@@ -29,6 +29,7 @@ Issue worktrees:
 - 完成回复和 Result file 的 `summary` / `changedFiles` / `repoResults` 必须清楚说明实际修改了哪些 repo、没有修改哪些列出的 repo，以及判断依据。
 - 只允许在上面列出的 `worktree` 路径内修改代码、运行测试和提交 commit。
 - 每个实际修改过的 repo 都必须保留本地 commit；如果 `branch` 与 `baseline` 相同，说明本次直接提交到目标分支。
+- `cnb/issue-*` 是本地临时分支，不要 push `cnb/issue-*` 分支到远端；runner 只会把本地 issue 分支合入目标 `baseline` 分支并 push 目标分支。
 - commit 标题建议格式：`fix(issue-{{ .Number }}): <中文简短问题描述>`，其中问题描述必须使用中文。
 - commit body 必须使用中文描述，且包含 `修复内容:` 和 `验证:`，写清修了什么、验证命令和结果。
 - shell 命令使用项目约定的命令前缀。
